@@ -60,7 +60,7 @@ class DiffusionQuantCacheConfig(BasePathConfig):
             path = path.replace(key, value)
         return path
 
-    def simplify(self, key_map: dict[str, set[str]]) -> tp.Self:
+    def simplify(self, key_map: dict[str, set[str]]) -> "CacheConfig":
         """Simplify the cache paths."""
         return self.apply(functools.partial(self.simplify_path, key_map=key_map))
 

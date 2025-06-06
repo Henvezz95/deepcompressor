@@ -2,6 +2,7 @@
 """Utility functions for Diffusion Models."""
 
 import enum
+from enum import Enum
 import typing as tp
 from abc import abstractmethod
 from collections import OrderedDict, defaultdict
@@ -1055,7 +1056,7 @@ class DiffusionResnetStruct(BaseModuleStruct):
 
 @dataclass(kw_only=True)
 class UNetBlockStruct(DiffusionBlockStruct):
-    class BlockType(enum.StrEnum):
+    class BlockType(str, Enum):
         DOWN = "down"
         MID = "mid"
         UP = "up"

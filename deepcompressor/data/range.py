@@ -29,7 +29,7 @@ class RangeBound:
         return {"min": self.min, "max": self.max}
 
     @classmethod
-    def from_dict(cls, data: dict[str, tp.Any] | None) -> tp.Optional[tp.Self]:
+    def from_dict(cls, data: dict[str, tp.Any] | None) -> tp.Optional["RangeIndex"]:
         """Return the range bound from the given dictionary."""
         return cls(min=data["min"], max=data["max"]) if data is not None else None
 
@@ -431,6 +431,6 @@ class DynamicRange:
         return {"min": self.min, "max": self.max, "ratio": self.ratio}
 
     @classmethod
-    def from_dict(cls, data: dict[str, tp.Any] | None) -> tp.Optional[tp.Self]:
+    def from_dict(cls, data: dict[str, tp.Any] | None) -> tp.Optional["RangeValues"]:
         """Return the dynamic range from the given dictionary."""
         return cls(min=data["min"], max=data["max"], ratio=data["ratio"]) if data is not None else None

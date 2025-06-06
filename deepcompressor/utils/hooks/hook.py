@@ -53,12 +53,12 @@ class Hook:
         """Whether the hook is an in-out-hook."""
         return self.pre and self.post
 
-    def activate(self) -> tp.Self:
+    def activate(self) -> "Hook":
         """Activate the hook."""
         self.activated = True
         return self
 
-    def deactivate(self) -> tp.Self:
+    def deactivate(self) -> "Hook":
         """Deactivate the hook."""
         self.activated = False
         return self
@@ -115,7 +115,7 @@ class Hook:
         module: nn.Module | tp.Iterable[nn.Module],
         prepend: bool | tuple[bool, bool] = False,
         always_call: bool = False,
-    ) -> tp.Self:
+    ) -> "Hook":
         """Register the hook to the module(s).
 
         Args:
@@ -140,7 +140,7 @@ class Hook:
                 )
         return self
 
-    def remove(self, module: nn.Module | tp.Iterable[nn.Module] | None = None) -> tp.Self:
+    def remove(self, module: nn.Module | tp.Iterable[nn.Module] | None = None) -> "Hook":
         """Remove the hook from the module(s).
 
         Args:

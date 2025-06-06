@@ -38,7 +38,7 @@ class BasePathConfig:
                 return False
         return True
 
-    def clone(self) -> tp.Self:
+    def clone(self) -> "PathConfig":
         """Clone the path configuration.
 
         Returns:
@@ -48,7 +48,7 @@ class BasePathConfig:
         fields = get_fields(self)
         return self.__class__(**{f.name: getattr(self, f.name) for f in fields})
 
-    def add_parent_dirs(self, *parent_dirs: str) -> tp.Self:
+    def add_parent_dirs(self, *parent_dirs: str) -> "PathConfig":
         """Add the parent directories to the paths.
 
         Args:
@@ -62,7 +62,7 @@ class BasePathConfig:
                 setattr(self, f.name, os.path.join(*parent_dirs, path))
         return self
 
-    def add_children(self, *children: str) -> tp.Self:
+    def add_children(self, *children: str) -> "PathConfig":
         """Add the children to the paths.
 
         Args:
@@ -76,7 +76,7 @@ class BasePathConfig:
                 setattr(self, f.name, os.path.join(path, *children))
         return self
 
-    def to_dirpath(self) -> tp.Self:
+    def to_dirpath(self) -> "PathConfig":
         """Convert the paths to directory paths."""
         fields = get_fields(self)
         for f in fields:
@@ -85,7 +85,7 @@ class BasePathConfig:
                 setattr(self, f.name, os.path.dirname(path))
         return self
 
-    def apply(self, fn: tp.Callable) -> tp.Self:
+    def apply(self, fn: tp.Callable) -> "PathConfig":
         """Apply the function to the paths.
 
         Args:
