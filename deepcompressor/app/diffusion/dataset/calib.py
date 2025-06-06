@@ -187,7 +187,7 @@ class DiffusionCalibCacheLoader(BaseCalibCacheLoader):
 
     def iter_samples(self) -> tp.Generator[ModuleForwardInput, None, None]:
         dataloader = self.dataset.build_loader(
-            batch_size=self.batch_size, shuffle=False, drop_last=True, num_workers=self.config.num_workers
+            batch_size=self.batch_size, shuffle=False, drop_last=True, num_workers=0
         )
         for data in dataloader:
             yield ModuleForwardInput(args=data["input_args"], kwargs=data["input_kwargs"])
