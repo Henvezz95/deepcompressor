@@ -496,17 +496,40 @@ def collect(config: DiffusionPtqRunConfig, dataset: datasets.Dataset):
              continue
 
         for step_idx in range(num_steps):
-            cache_item = {
-                'input_args': (infinity_model.input_cache[step_idx],),
-                'outputs': infinity_model.output_cache[step_idx],
+            # Split the guided and unguided data along the batch dimension
+            # Assumes guided is the first half, unguided is the second.
+            # The original batch size 'B' in autoregressive_infer_cfg was 1. 
+            # With CFG, the tensor batch size is 2.
+            
+            # Input tensor shape is likely [2, SeqLen, Channels]
+            input_tensors = torch.chunk(infinity_model.input_cache[step_idx], 2, dim=0)
+            # Output tensor shape is also likely [2, SeqLen, Channels]
+            output_tensors = torch.chunk(infinity_model.output_cache[step_idx], 2, dim=0)
+            
+            # Save GUIDED cache (guidance=1)
+            guided_cache = {
+                'input_args': (input_tensors[0],),  # First half of the batch
+                'output': output_tensors[0], 
+                'filename': filename,
+                'step': step_idx,
+                'guidance': 1 
+            }
+            save_path_guided = os.path.join(caches_dirpath, f"{filename}-{step_idx:03d}-1.pt")
+            torch.save(guided_cache, save_path_guided)
+
+            # Save UNGUIDED cache (guidance=0)
+            unguided_cache = {
+                'input_args': (input_tensors[1],), # Second half of the batch
+                'output': output_tensors[1],
                 'filename': filename,
                 'step': step_idx,
                 'guidance': 0
             }
-            save_path = os.path.join(caches_dirpath, f"{filename}-{step_idx:03d}-0.pt")
-            torch.save(cache_item, save_path)
-    
-    print("\n✅ Calibration data collection finished.")
+            save_path_unguided = os.path.join(caches_dirpath, f"{filename}-{step_idx:03d}-0.pt")
+            torch.save(unguided_cache, save_path_unguided)
+
+        print("\n✅ Calibration data collection finished.")
+
 
 
 
