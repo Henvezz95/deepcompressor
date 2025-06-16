@@ -7,6 +7,8 @@ from functools import partial
 import math
 import sys
 import argparse 
+import cv2
+import numpy as np
 
 # --- Configure Python Path to Find Modules ---
 sys.path.append('./') 
@@ -16,66 +18,224 @@ sys.path.append('./Infinity_rep')
 
 # DeepCompressor Structs
 from deepcompressor.nn.struct.base import BaseModuleStruct
-from deepcompressor.nn.struct.attn import AttentionConfigStruct
+from deepcompressor.nn.struct.attn import AttentionConfigStruct, AttentionStruct
+from deepcompressor.utils.common import join_name
 from deepcompressor.app.diffusion.nn.struct import (
     DiffusionAttentionStruct,
     DiffusionFeedForwardStruct,
     DiffusionTransformerBlockStruct,
     FeedForwardConfigStruct,
+    DiffusionModuleStruct,
     DiTStruct,
 )
 
 # Infinity Model Components
+from diffusers.models.attention_processor import Attention
 from infinity.models.infinity import Infinity
 from infinity.models.basic import (
     CrossAttnBlock,
     SelfAttention,
     CrossAttention,
     FFN,
-    FFNSwiGLU
+    FFNSwiGLU,
+    apply_rotary_emb
 )
 # We need to import the loader functions
-from tools.run_infinity import load_visual_tokenizer, load_transformer
+from tools.run_infinity import load_visual_tokenizer, load_transformer, load_tokenizer, gen_one_img, h_div_w_templates, dynamic_resolution_h_w
 
 
-# --- Our New Adapter Structs (These are correct and remain the same) ---
+# --- MODIFICATION: We will create a modified SelfAttention layer ---
+# This new layer will be compatible with the deepcompressor framework.
+
+class PatchedSelfAttention(Attention):
+    """
+    Inherits from diffusers.Attention to be fully compatible with deepcompressor.
+    It overrides the __init__ and forward methods to replicate the exact behavior
+    of the original Infinity SelfAttention layer with unfused projections.
+    """
+    def __init__(self, original_sa_module: SelfAttention):
+        dim_head = original_sa_module.proj.in_features // original_sa_module.num_heads
+        super().__init__(
+            query_dim=original_sa_module.proj.in_features,
+            heads=original_sa_module.num_heads,
+            dim_head=dim_head,
+            bias=True
+        )
+        
+        original_qkv_weight = original_sa_module.mat_qkv.weight
+        q_w, k_w, v_w = torch.chunk(original_qkv_weight, 3, dim=0)
+        self.to_q.weight.data.copy_(q_w)
+        self.to_k.weight.data.copy_(k_w)
+        self.to_v.weight.data.copy_(v_w)
+        
+        self.to_q.bias.data.copy_(original_sa_module.q_bias)
+        self.to_k.bias.data.zero_()
+        self.to_v.bias.data.copy_(original_sa_module.v_bias)
+        
+        self.to_out[0].weight.data.copy_(original_sa_module.proj.weight)
+        self.to_out[0].bias.data.copy_(original_sa_module.proj.bias)
+
+        self.cos_attn = original_sa_module.cos_attn
+        if self.cos_attn:
+            self.scale = 1.0
+            self.scale_mul_1H11 = nn.Parameter(original_sa_module.scale_mul_1H11.data.clone())
+            self.max_scale_mul = original_sa_module.max_scale_mul
+        else:
+            tau = getattr(original_sa_module, 'tau', 1.0)
+            self.scale = 1 / math.sqrt(dim_head) / tau
+        
+        self.pad_to_multiplier = original_sa_module.pad_to_multiplier
+        self.rope2d_normalized_by_hw = original_sa_module.rope2d_normalized_by_hw
+        
+        self.caching = False
+        self.cached_k = None
+        self.cached_v = None
+
+        # --- THIS IS THE FIX ---
+        # Add a .proj attribute for compatibility with the InfinityAttentionStruct parser.
+        self.proj = self.to_out[0]
+
+    def kv_caching(self, enable: bool):
+        self.caching = enable
+        self.cached_k = None
+        self.cached_v = None
+
+    def forward(self, *args, **kwargs):
+        hidden_states           = args[0]
+        attention_mask          = args[1]
+        scale_schedule          = args[3]
+        rope2d_freqs_grid       = args[4]
+        scale_ind               = kwargs.get('scale_ind', 0)
+        
+        B, L_current, C = hidden_states.shape
+        head_dim = self.inner_dim // self.heads
+        
+        q = self.to_q(hidden_states).view(B, L_current, self.heads, head_dim).transpose(1, 2)
+        k = self.to_k(hidden_states).view(B, L_current, self.heads, head_dim).transpose(1, 2)
+        v = self.to_v(hidden_states).view(B, L_current, self.heads, head_dim).transpose(1, 2)
+        
+        if self.cos_attn:
+            scale_mul = self.scale_mul_1H11.reshape(1, self.heads, 1, 1).clamp_max(self.max_scale_mul).exp()
+            q = F.normalize(q, dim=-1, eps=1e-12).mul(scale_mul)
+            k = F.normalize(k, dim=-1, eps=1e-12)
+
+        if rope2d_freqs_grid is not None:
+            q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind)
+
+        if self.caching:
+            if self.cached_k is None:
+                self.cached_k, self.cached_v = k, v
+            else:
+                self.cached_k = torch.cat((self.cached_k, k), dim=2)
+                self.cached_v = torch.cat((self.cached_v, v), dim=2)
+            k_final, v_final = self.cached_k, self.cached_v
+        else:
+            k_final, v_final = k, v
+            
+        out = F.scaled_dot_product_attention(q, k_final, v_final, attn_mask=attention_mask, scale=self.scale)
+        
+        out = out.transpose(1, 2).reshape(B, L_current, C)
+        out = self.to_out[0](out)
+        out = self.to_out[1](out)
+        
+        return out
+
+class PatchedCrossAttention(Attention):
+    """
+    Inherits from diffusers.Attention for framework compatibility.
+    """
+    def __init__(self, original_ca_module: CrossAttention):
+        dim_head = original_ca_module.head_dim
+        super().__init__(
+            query_dim=original_ca_module.embed_dim,
+            cross_attention_dim=original_ca_module.kv_dim,
+            heads=original_ca_module.num_heads,
+            dim_head=dim_head,
+            bias=True
+        )
+
+        self.to_q.weight.data.copy_(original_ca_module.mat_q.weight)
+        self.to_q.bias.data.copy_(original_ca_module.mat_q.bias)
+        
+        original_kv_weight = original_ca_module.mat_kv.weight
+        k_w, v_w = torch.chunk(original_kv_weight, 2, dim=0)
+        self.to_k.weight.data.copy_(k_w)
+        self.to_v.weight.data.copy_(v_w)
+        self.to_k.bias.data.zero_()
+        self.to_v.bias.data.copy_(original_ca_module.v_bias)
+        
+        self.to_out[0].weight.data.copy_(original_ca_module.proj.weight)
+        self.to_out[0].bias.data.copy_(original_ca_module.proj.bias)
+
+        self.scale = 1 / math.sqrt(dim_head)
+        
+        # --- THIS IS THE FIX ---
+        # Add a .proj attribute for compatibility with the InfinityAttentionStruct parser.
+        self.proj = self.to_out[0]
+
+    def forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None, **kwargs):
+        if isinstance(encoder_hidden_states, tuple):
+            context_tensor = encoder_hidden_states[0]
+        else:
+            context_tensor = encoder_hidden_states
+        
+        B_x, L_x, C = hidden_states.shape
+        head_dim = self.inner_dim // self.heads
+        
+        q = self.to_q(hidden_states).view(B_x, L_x, self.heads, head_dim).transpose(1, 2)
+        
+        L_kv = context_tensor.shape[0] // B_x
+        
+        k = self.to_k(context_tensor).view(B_x, L_kv, self.heads, head_dim).transpose(1, 2)
+        v = self.to_v(context_tensor).view(B_x, L_kv, self.heads, head_dim).transpose(1, 2)
+        
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, scale=self.scale)
+        
+        out = out.transpose(1, 2).reshape(B_x, L_x, C)
+        out = self.to_out[0](out)
+        out = self.to_out[1](out)
+        return out
+    
 
 class InfinityAttentionStruct(DiffusionAttentionStruct):
-    def __post_init__(self):
-        BaseModuleStruct.__post_init__(self)
-        if isinstance(self.module, SelfAttention):
-            assert self.q_proj.weight.shape[0] == self.config.hidden_size * 3
-        else:
-            assert self.q_proj.weight.shape[0] == self.config.hidden_size
-            assert self.k_proj.weight.shape[0] == self.config.hidden_size * 2
-        assert self.o_proj.weight.shape[1] == self.config.hidden_size
-
     @staticmethod
-    def _default_construct(module: tp.Union[SelfAttention, CrossAttention],/, parent: tp.Optional["InfinityTransformerBlockStruct"] = None,fname: str = "", rname: str = "", rkey: str = "", idx: int = 0, **kwargs,) -> "InfinityAttentionStruct":
-        if isinstance(module, SelfAttention):
-            q_proj, k_proj, v_proj = module.mat_qkv, module.mat_qkv, module.mat_qkv
-            q_proj_rname, k_proj_rname, v_proj_rname = "mat_qkv", "mat_qkv", "mat_qkv"
-            o_proj, o_proj_rname = module.proj, "proj"
-            with_rope = True
-        elif isinstance(module, CrossAttention):
-            q_proj, q_proj_rname = module.mat_q, "mat_q"
-            k_proj, v_proj = module.mat_kv, module.mat_kv
-            k_proj_rname, v_proj_rname = "mat_kv", "mat_kv"
-            o_proj, o_proj_rname = module.proj, "proj"
-            with_rope = False
+    def _default_construct(
+        module: Attention, # Now expects a diffusers.Attention subclass
+        /, parent: tp.Optional["InfinityTransformerBlockStruct"] = None,
+        fname: str = "", rname: str = "", rkey: str = "", idx: int = 0, **kwargs,
+    ) -> "InfinityAttentionStruct":
+        
+        is_cross = module.cross_attention_dim is not None
+
+        if hasattr(module, 'proj'):
+             o_proj, o_proj_rname = module.proj, "proj"
         else:
-            raise TypeError(f"Unsupported module type: {type(module)}")
-        config = AttentionConfigStruct(hidden_size=o_proj.in_features,inner_size=q_proj.weight.shape[0],num_query_heads=module.num_heads, num_key_value_heads=module.num_heads,with_qk_norm=False, with_rope=with_rope, linear_attn=False)
-        return InfinityAttentionStruct(module=module, parent=parent, fname=fname, idx=idx, rname=rname, rkey=rkey,config=config, q_proj=q_proj, k_proj=k_proj, v_proj=v_proj, o_proj=o_proj,q_proj_rname=q_proj_rname, k_proj_rname=k_proj_rname, v_proj_rname=v_proj_rname,o_proj_rname=o_proj_rname, add_q_proj=None, add_k_proj=None, add_v_proj=None,add_o_proj=None, add_q_proj_rname="", add_k_proj_rname="", add_v_proj_rname="",add_o_proj_rname="", q=None, k=None, v=None, q_rname="", k_rname="", v_rname="")
+             o_proj, o_proj_rname = module.to_out[0], "to_out.0"
+
+        # CORRECTED: Use `module.heads` which is the attribute from the parent Attention class
+        num_heads = module.heads
+        
+        config = AttentionConfigStruct(
+            hidden_size=o_proj.in_features,
+            inner_size=o_proj.in_features,
+            num_query_heads=num_heads, 
+            num_key_value_heads=num_heads,
+            with_qk_norm=getattr(module, 'cos_attn', False),
+            with_rope=not is_cross,
+            linear_attn=False,
+        )
+        
+        return DiffusionAttentionStruct(
+            module=module, parent=parent, fname=fname, idx=idx, rname=rname, rkey=rkey,
+            config=config, q_proj=module.to_q, k_proj=module.to_k, v_proj=module.to_v, o_proj=o_proj,
+            q_proj_rname="to_q", k_proj_rname="to_k", v_proj_rname="to_v",
+            o_proj_rname=o_proj_rname, add_q_proj=None, add_k_proj=None, add_v_proj=None,
+            add_o_proj=None, add_q_proj_rname="", add_k_proj_rname="", add_v_proj_rname="",
+            add_o_proj_rname="", q=None, k=None, v=None, q_rname="", k_rname="", v_rname=""
+        )
+
 
 class InfinityFeedForwardStruct(DiffusionFeedForwardStruct):
-    def __post_init__(self):
-        BaseModuleStruct.__post_init__(self)
-        for up_proj in self.up_projs:
-            assert up_proj.weight.shape[1] == self.config.hidden_size
-        for down_proj in self.down_projs:
-            assert down_proj.weight.shape[0] == self.config.hidden_size
-
     @staticmethod
     def _default_construct(module: tp.Union[FFN, FFNSwiGLU],/, parent: tp.Optional["InfinityTransformerBlockStruct"] = None,fname: str = "", rname: str = "", rkey: str = "", idx: int = 0, **kwargs,) -> "InfinityFeedForwardStruct":
         if isinstance(module, FFN):
@@ -85,24 +245,85 @@ class InfinityFeedForwardStruct(DiffusionFeedForwardStruct):
         else:
             raise TypeError(f"Unsupported module type: {type(module)}")
         config = FeedForwardConfigStruct(hidden_size=down_projs[0].out_features, intermediate_size=up_projs[0].out_features, intermediate_act_type=act_type, num_experts=1)
-        return InfinityFeedForwardStruct(module=module, parent=parent, fname=fname, idx=idx, rname=rname, rkey=rkey,config=config, up_projs=up_projs, down_projs=down_projs,up_proj_rnames=up_proj_rnames, down_proj_rnames=down_proj_rnames)
-
+        
+        return DiffusionFeedForwardStruct(
+            module=module, parent=parent, fname=fname, idx=idx, rname=rname, rkey=rkey,
+            config=config, up_projs=up_projs, down_projs=down_projs,
+            up_proj_rnames=up_proj_rnames, down_proj_rnames=down_proj_rnames
+        )
+    
 class InfinityTransformerBlockStruct(DiffusionTransformerBlockStruct):
     def __post_init__(self):
-        # We need to explicitly set the child struct classes for the parent
         self.attn_struct_cls = InfinityAttentionStruct
         self.ffn_struct_cls = InfinityFeedForwardStruct
-        if hasattr(super(), '__post_init__'):
-            super().__post_init__()
+        super().__post_init__()
 
     @staticmethod
     def _default_construct(module: CrossAttnBlock,/, parent: tp.Optional[BaseModuleStruct] = None,fname: str = "", rname: str = "", rkey: str = "", idx: int = 0, **kwargs,) -> "InfinityTransformerBlockStruct":
-        return InfinityTransformerBlockStruct(module=module, parent=parent, fname=fname, idx=idx, rname=rname, rkey=rkey,attns=[module.sa, module.ca], ffn=module.ffn,pre_attn_norms=[module.ln_wo_grad, module.ca_norm], pre_ffn_norm=module.ln_wo_grad,parallel=False, pre_attn_add_norms=[], add_ffn=None, pre_add_ffn_norm=None,norm_type="layer_norm", add_norm_type="layer_norm",pre_attn_norm_rnames=["ln_wo_grad", "ca_norm"], attn_rnames=["sa", "ca"],pre_ffn_norm_rname="ln_wo_grad", ffn_rname="ffn",pre_attn_add_norm_rnames=[], pre_add_ffn_norm_rname="", add_ffn_rname="")
+        return InfinityTransformerBlockStruct(
+            module=module, parent=parent, fname=fname, idx=idx, rname=rname, rkey=rkey,
+            attns=[module.sa, module.ca],
+            ffn=module.ffn,
+            pre_attn_norms=[module.ln_wo_grad, module.ca_norm],
+            pre_ffn_norm=module.ln_wo_grad,
+            parallel=False, 
+            pre_attn_add_norms=[],
+            add_ffn=None,
+            pre_add_ffn_norm=None,
+            norm_type="layer_norm", 
+            add_norm_type="layer_norm",
+            pre_attn_norm_rnames=["ln_wo_grad", "ca_norm"],
+            attn_rnames=["sa", "ca"],
+            pre_ffn_norm_rname="ln_wo_grad",
+            ffn_rname="ffn",
+            pre_attn_add_norm_rnames=[],
+            pre_add_ffn_norm_rname="",
+            add_ffn_rname=""
+        )
 
 class InfinityStruct(DiTStruct):
-    """ Top-level adapter for the entire Infinity model. """
+    """ Top-level adapter for the entire Infinity model with corrected naming logic. """
     transformer_block_struct_cls: tp.ClassVar[type[DiffusionTransformerBlockStruct]] = InfinityTransformerBlockStruct
     
+    def __post_init__(self):
+        super(DiTStruct, self).__post_init__()
+
+        # --- FIX: Manually set the _name attributes on self ---
+        self.pre_module_structs = {}
+        for fname in ("input_embed", "time_embed", "text_embed"):
+            module, rname, rkey = getattr(self, fname), getattr(self, f"{fname}_rname"), getattr(self, f"{fname}_rkey")
+            setattr(self, f"{fname}_key", join_name(self.key, rkey, sep="_"))
+            if module is not None:
+                name = join_name(self.name, rname)
+                # This is the new, critical line that was missing
+                setattr(self, f"{fname}_name", name) 
+                self.pre_module_structs.setdefault(name, DiffusionModuleStruct(module=module, parent=self, fname=fname, rname=rname, rkey=rkey))
+
+        self.post_module_structs = {}
+        self.norm_out_key = join_name(self.key, self.norm_out_rkey, sep="_")
+        for fname in ("norm_out", "proj_out"):
+             module, rname, rkey = getattr(self, fname), getattr(self, f"{fname}_rname"), getattr(self, f"{fname}_rkey")
+             if module is not None:
+                 name = join_name(self.name, rname)
+                 # This is the new, critical line that was missing
+                 setattr(self, f"{fname}_name", name)
+                 self.post_module_structs.setdefault(name, DiffusionModuleStruct(module=module, parent=self, fname=fname, rname=rname, rkey=rkey))
+
+        # --- CUSTOM BLOCK NAMING LOGIC (from previous fix) ---
+        num_chunks = self.module.num_block_chunks
+        num_blocks_per_chunk = self.module.num_blocks_in_a_chunk
+        transformer_block_rnames = [f"{self.transformer_blocks_rname}.{i}.module.{j}" for i in range(num_chunks) for j in range(num_blocks_per_chunk)]
+        
+        self.transformer_blocks_name = join_name(self.name, self.transformer_blocks_rname) # "block_chunks"
+        self.transformer_block_names = [join_name(self.name, rname) for rname in transformer_block_rnames]
+        
+        self.transformer_block_structs = [
+            self.transformer_block_struct_cls.construct(
+                layer, parent=self, fname="transformer_block", rname=rname, rkey=self.transformer_block_rkey, idx=idx,
+            )
+            for idx, (layer, rname) in enumerate(zip(self.transformer_blocks, transformer_block_rnames, strict=True))
+        ]
+
     @staticmethod
     def _default_construct(
         module: Infinity,
@@ -113,31 +334,44 @@ class InfinityStruct(DiTStruct):
         transformer_blocks_list = nn.ModuleList(all_blocks)
         return InfinityStruct(
             module=module, parent=parent, fname=fname, idx=idx, rname=rname, rkey=rkey,
-            input_embed=module.word_embed,
-            time_embed=module.shared_ada_lin,
-            text_embed=module.text_proj_for_ca,
-            transformer_blocks=transformer_blocks_list,
-            norm_out=module.head_nm,
-            proj_out=module.head,
-            input_embed_rname="word_embed",
-            time_embed_rname="shared_ada_lin",
-            text_embed_rname="text_proj_for_ca",
-            transformer_blocks_rname="block_chunks",
-            norm_out_rname="head_nm",
-            proj_out_rname="head",
+            input_embed=module.word_embed, time_embed=module.shared_ada_lin, text_embed=module.text_proj_for_ca,
+            transformer_blocks=transformer_blocks_list, norm_out=module.head_nm, proj_out=module.head,
+            input_embed_rname="word_embed", time_embed_rname="shared_ada_lin", text_embed_rname="text_proj_for_ca",
+            transformer_blocks_rname="block_chunks", norm_out_rname="head_nm", proj_out_rname="head",
         )
 
-# --- The New Strategy: Comprehensive Registration ---
 
-# Register all our custom adapters with their appropriate base classes.
-# This ensures they can be found by the generic `construct` method.
+
+# Register our lower-level factories so the framework can find them when DiTStruct builds its children
 DiffusionAttentionStruct.register_factory((SelfAttention, CrossAttention), InfinityAttentionStruct._default_construct)
 DiffusionFeedForwardStruct.register_factory((FFN, FFNSwiGLU), InfinityFeedForwardStruct._default_construct)
 DiffusionTransformerBlockStruct.register_factory(CrossAttnBlock, InfinityTransformerBlockStruct._default_construct)
-# Registering with DiTStruct, which is the direct parent we want to use.
 DiTStruct.register_factory(Infinity, InfinityStruct._default_construct)
+DiffusionAttentionStruct.register_factory((PatchedSelfAttention, PatchedCrossAttention), InfinityAttentionStruct._default_construct)
 # And as a fallback, register with the absolute base class as you suggested.
 BaseModuleStruct.register_factory(Infinity, InfinityStruct._default_construct)
+
+def patchModel(model: Infinity) -> nn.Module:
+    """
+    Replaces the original attention layers with unfused, compatible versions,
+    ensuring they are on the same device as the original model.
+    """
+    for block in model.block_chunks.children():
+        for sub_block in block.module.children():
+            if isinstance(sub_block, CrossAttnBlock):    
+                # 1. Get the correct device from the original module before replacing it.
+                device = sub_block.sa.proj.weight.device
+                
+                # 2. Create the new patched modules and immediately move them to the correct device.
+                patched_sa = PatchedSelfAttention(sub_block.sa).to(device)
+                patched_ca = PatchedCrossAttention(sub_block.ca).to(device)
+                
+                # 3. Assign the new, device-correct modules back to the model.
+                sub_block.sa = patched_sa
+                sub_block.ca = patched_ca
+                
+    return model
+
 
 
 # --- Main Test Execution ---
@@ -159,21 +393,70 @@ def main():
     
     vae = load_visual_tokenizer(args)
     model = load_transformer(vae, args)
+
+    text_tokenizer, text_encoder = load_tokenizer(t5_path=args.text_encoder_ckpt)
+
+    h_div_w = 1/1
+    h_div_w_template_ = h_div_w_templates[np.argmin(np.abs(h_div_w_templates-h_div_w))]
+    scale_schedule = dynamic_resolution_h_w[h_div_w_template_][args.pn]['scales']
+    scale_schedule = [(1, h, w) for (_, h, w) in scale_schedule]
+    img = gen_one_img(
+        model,
+        vae,
+        text_tokenizer,
+        text_encoder,
+        'A photo of a cat',
+        g_seed=16,
+        gt_leak=0,
+        gt_ls_Bl=None,
+        cfg_list=3.0,
+        tau_list=0.5,
+        scale_schedule=scale_schedule,
+        cfg_insertion_layer=[args.cfg_insertion_layer],
+        vae_type=args.vae_type,
+        sampling_per_bits=args.sampling_per_bits,
+        enable_positive_prompt=True,
+    )
+    cv2.imwrite('img.png', img.detach().cpu().numpy())
     
     print("Full Infinity model loaded successfully.\n")
+    # --- Patch the model before creating the struct ---
+    print("--- Patching attention layers to be compatible ---")
+    patched_model = patchModel(model)
+    print("Patching complete.\n")
+
+
+    img = gen_one_img(
+        patched_model,
+        vae,
+        text_tokenizer,
+        text_encoder,
+        'A photo of a cat',
+        g_seed=16,
+        gt_leak=0,
+        gt_ls_Bl=None,
+        cfg_list=3.0,
+        tau_list=0.5,
+        scale_schedule=scale_schedule,
+        cfg_insertion_layer=[args.cfg_insertion_layer],
+        vae_type=args.vae_type,
+        sampling_per_bits=args.sampling_per_bits,
+        enable_positive_prompt=True,
+    )
+    cv2.imwrite('img_patched.png', img.detach().cpu().numpy())
+    
 
     # --- Test the full model parsing ---
     print("--- Testing full Infinity model parsing ---")
     
-    # The generic construct call should now work because we've registered our factories.
-    model_struct = DiTStruct.construct(model)
+    # The generic construct call should now work because we've patched it.
+    model_struct = DiTStruct.construct(patched_model)
 
     print(f"Created model_struct for: {type(model_struct.module).__name__}")
     print(f"  - The struct is of type: {type(model_struct).__name__}")
     print(f"  - It found {model_struct.num_blocks} transformer blocks.")
     
-    # Verification checks
-    assert isinstance(model_struct, InfinityStruct)
+    assert isinstance(model_struct, DiTStruct)
     assert len(model_struct.block_structs) > 0
     first_block_struct = model_struct.block_structs[0]
     
