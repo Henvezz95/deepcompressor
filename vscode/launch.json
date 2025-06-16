@@ -1,0 +1,116 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug current file",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/deepcompressor/deepenv/bin/python",
+      "program": "${file}", // Should resolve to /workspace/Infinity/tools/reproduce.py
+      "cwd": "${workspaceFolder}/deepcompressor/", // Sets CWD to /workspace/Infinity/
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        // This explicitly adds /workspace/Infinity to PYTHONPATH for the debugger.
+        // Python will then look inside /workspace/Infinity for a module/package
+        // named 'infinity' (which is your /workspace/Infinity/infinity/ folder).
+        // Using ${env:PYTHONPATH} ensures you append to an existing PYTHONPATH if set.
+        "PYTHONPATH": "${workspaceFolder}/deepcompressor:${env:PYTHONPATH}"
+        // If you don't expect any other PYTHONPATH, you can simplify to:
+        // "PYTHONPATH": "${workspaceFolder}/Infinity/"
+        }
+    },
+    {
+      "name": "Python: DeepCompressor PTQ",
+      "type": "debugpy", // Specifies the debugger type as Python
+      "request": "launch", // Specifies that this configuration is for launching/debugging
+      "python": "${workspaceFolder}/deepcompressor_orig/deepenv/bin/python", // Path to the Python interpreter in your virtual environment.
+                                                                  // If your venv uses 'python3' specifically, change this to '.../venv/bin/python3'.
+      "module": "deepcompressor.app.diffusion.ptq", // Tells VSCode to run the script as a module (equivalent to 'python -m ...')
+      "args": [
+          //"examples/diffusion/configs/model/flux.1-schnell.yaml", // First argument to your script 
+          "examples/diffusion/configs/model/sana-1.6b.yaml",
+          "--output-dirname",                  // Second argument
+          "reference"                          // Third argument
+      ],
+      "cwd": "${workspaceFolder}/deepcompressor", // Sets the current working directory to your project's root,
+                                                // ensuring relative paths like 'configs/...' are resolved correctly.
+      "console": "integratedTerminal", // Launches the script in VSCode's integrated terminal
+      "justMyCode": true // Set to true to debug only your code; set to false to also step into library code.
+                          // You might want to set this to false if you need to debug issues within the libraries your script uses.
+    },
+        {
+            "name": "Python: DeepCompressor Collect Calib",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${workspaceFolder}/deepcompressor/deepenv/bin/python", // Path to the Python interpreter in your virtual environment
+            "module": "deepcompressor.app.diffusion.dataset.collect.calib_infinity", // The module to run
+            "args": [
+                //"examples/diffusion/configs/model/flux.1-schnell.yaml", // First argument: model config
+                //"examples/diffusion/configs/model/sana-1.6b.yaml",
+                "examples/diffusion/configs/model/infinity-2b.yaml",
+                "examples/diffusion/configs/collect/qdiff.yaml"         // Second argument: collection config
+            ],
+            "cwd": "${workspaceFolder}/deepcompressor", // Set current working directory to resolve relative config paths
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: DeepCompressor PTQ SVDQuant INT4 Eval",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${workspaceFolder}/deepcompressor/deepenv/bin/python", // Path to the Python interpreter in your virtual environment
+            "module": "deepcompressor.app.diffusion.ptq", // The module to run
+            "args": [
+                //"examples/diffusion/configs/model/flux.1-schnell.yaml", // Model config
+                "examples/diffusion/configs/model/sana-1.6b.yaml",
+                "examples/diffusion/configs/svdquant/int4.yaml",       // SVDQuant config
+                "--eval-benchmarks",
+                "MJHQ",
+                "--eval-num-samples",
+                "128",
+                "--save-model", "true" // Save the model after evaluation
+            ],
+            "cwd": "${workspaceFolder}/deepcompressor", // Set current working directory to resolve relative config paths
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+                {
+            "name": "Python: DeepCompressor INFINITY PTQ SVDQuant INT4 Eval",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${workspaceFolder}/deepcompressor/deepenv/bin/python", // Path to the Python interpreter in your virtual environment
+            "module": "deepcompressor.app.diffusion.ptq_infinity", // The module to run
+            "args": [
+                "examples/diffusion/configs/model/infinity-2b.yaml",
+                "examples/diffusion/configs/svdquant/int4.yaml",       // SVDQuant config
+                "examples/diffusion/configs/svdquant/fast.yaml",
+                "--eval-benchmarks",
+                "MJHQ",
+                "--eval-num-samples",
+                "128",
+                "--save-model", "true" // Save the model after evaluation
+            ],
+            "cwd": "${workspaceFolder}/deepcompressor", // Set current working directory to resolve relative config paths
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },{
+            "name": "Python: DeepCompressor INFINITY Compile INT4 Eval",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${workspaceFolder}/deepcompressor/deepenv/bin/python", // Path to the Python interpreter in your virtual environment
+            "module": "deepcompressor.backend.nunchaku.convert", // The module to run
+            "args": [
+                "--quant-path",
+                "runs/diffusion/infinity_2b/infinity_2b/w.4-x.4-y.16/w.sint4-x.sint4.u-y.bf16/w.v64.bf16-x.v64.bf16-y.tnsr.bf16/smooth.proj-w.static.lowrank/shift-skip.x.[[w]+tan+tn].w.[e+tpo]-low.r32.i100.e.skip.[r+s+tan+tn+tpi]-smth.proj.GridSearch.bn2.[AbsMax].lr.skip.[r+s+tan+tn+tpi]-qdiff.128-t13.g3.0-s128.RUNNING/run-250613.112233.RUNNING/model",       // SVDQuant config
+                "--output-root",
+                "./Saved Models",
+                "--model-name",
+                "infinity_2b"
+            ],
+            "cwd": "${workspaceFolder}/deepcompressor", // Set current working directory to resolve relative config paths
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+  ]
+}
