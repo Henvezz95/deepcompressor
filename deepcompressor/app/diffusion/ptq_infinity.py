@@ -13,9 +13,10 @@ from diffusers import DiffusionPipeline
 
 from deepcompressor.app.llm.nn.patch import patch_attention, patch_gemma_rms_norm
 from deepcompressor.app.llm.ptq import ptq as llm_ptq
+
 from deepcompressor.utils import tools
 import argparse
-from deepcompressor.app.diffusion.nn.struct_infinity import InfinityStruct, patchModel
+from deepcompressor.app.diffusion.nn.struct_infinity import InfinityStruct, patchModel, register_factories
 from deepcompressor.app.diffusion.nn.struct import DiTStruct
 
 from .config import DiffusionPtqCacheConfig, DiffusionPtqRunConfig, DiffusionQuantCacheConfig, DiffusionQuantConfig
@@ -25,8 +26,9 @@ from .quant import (
     quantize_diffusion_activations,
     quantize_diffusion_weights,
     rotate_diffusion,
-    smooth_diffusion,
+    #smooth_diffusion,
 )
+from .quant.smooth_infinity import smooth_infinity_model as smooth_diffusion
 
 # Your model loading utilities
 from Infinity_rep.infinity.models.infinity import Infinity
@@ -97,6 +99,8 @@ def ptq(  # noqa: C901
     if not isinstance(model, DiffusionModelStruct):
         model = DiffusionModelStruct.construct(model)
     assert isinstance(model, DiffusionModelStruct)
+
+    register_factories()
 
     quant_wgts = config.enabled_wgts
     quant_ipts = config.enabled_ipts

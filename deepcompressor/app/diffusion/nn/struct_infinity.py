@@ -340,16 +340,19 @@ class InfinityStruct(DiTStruct):
             transformer_blocks_rname="block_chunks", norm_out_rname="head_nm", proj_out_rname="head",
         )
 
-
-
-# Register our lower-level factories so the framework can find them when DiTStruct builds its children
-DiffusionAttentionStruct.register_factory((SelfAttention, CrossAttention), InfinityAttentionStruct._default_construct)
-DiffusionFeedForwardStruct.register_factory((FFN, FFNSwiGLU), InfinityFeedForwardStruct._default_construct)
-DiffusionTransformerBlockStruct.register_factory(CrossAttnBlock, InfinityTransformerBlockStruct._default_construct)
-DiTStruct.register_factory(Infinity, InfinityStruct._default_construct)
-DiffusionAttentionStruct.register_factory((PatchedSelfAttention, PatchedCrossAttention), InfinityAttentionStruct._default_construct)
-# And as a fallback, register with the absolute base class as you suggested.
-BaseModuleStruct.register_factory(Infinity, InfinityStruct._default_construct)
+def register_factories():
+    """
+    Register the InfinityStruct and its components with the deepcompressor framework.
+    This allows the framework to recognize and construct Infinity models correctly.
+    """
+    # Register our lower-level factories so the framework can find them when DiTStruct builds its children
+    DiffusionAttentionStruct.register_factory((SelfAttention, CrossAttention), InfinityAttentionStruct._default_construct)
+    DiffusionFeedForwardStruct.register_factory((FFN, FFNSwiGLU), InfinityFeedForwardStruct._default_construct)
+    DiffusionTransformerBlockStruct.register_factory(CrossAttnBlock, InfinityTransformerBlockStruct._default_construct)
+    DiTStruct.register_factory(Infinity, InfinityStruct._default_construct)
+    DiffusionAttentionStruct.register_factory((PatchedSelfAttention, PatchedCrossAttention), InfinityAttentionStruct._default_construct)
+    # And as a fallback, register with the absolute base class as you suggested.
+    BaseModuleStruct.register_factory(Infinity, InfinityStruct._default_construct)
 
 def patchModel(model: Infinity) -> nn.Module:
     """
@@ -376,6 +379,7 @@ def patchModel(model: Infinity) -> nn.Module:
 
 # --- Main Test Execution ---
 def main():
+    register_factories()
     print("--- Loading a real Infinity model from checkpoint ---")
     
     args = argparse.Namespace(
