@@ -18,14 +18,13 @@ from deepcompressor.utils.common import hash_str_to_int, tree_map, tree_split
 from Infinity_rep.infinity.models.infinity import Infinity 
 from Infinity_rep.tools.run_infinity import *
 
-from ...utils import get_control
-from ..data import get_dataset
-from .utils import CollectHook
+from deepcompressor.app.diffusion.dataset.data import get_dataset
 
 from Infinity_rep.infinity.models.infinity import Infinity, SelfAttnBlock, CrossAttnBlock, sample_with_top_k_top_p_also_inplace_modifying_logits_
 from Infinity_rep.tools.run_infinity import load_visual_tokenizer, load_tokenizer, gen_one_img
 from Infinity_rep.infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
-
+from deepcompressor.app.diffusion.nn.struct_infinity import patchModel 
+from contextlib import contextmanager
 
 import inspect
 import typing as tp
@@ -69,74 +68,52 @@ h_div_w_template_ = h_div_w_templates[np.argmin(np.abs(h_div_w_templates-h_div_w
 scale_schedule = dynamic_resolution_h_w[h_div_w_template_][args.pn]['scales']
 scale_schedule = [(1, h, w) for (_, h, w) in scale_schedule]
 
-def unpack_single_tuple(text_cond_tuple, device):
-    """Takes one packed tuple and returns padded tensors."""
-    kv_compact, lens, cu_seqlens_k, Ltext = text_cond_tuple
-    B = len(lens) # Should be 1 for this use case
-
-    # Reconstruct padded hidden state
-    padded_hidden_state = torch.zeros(B, Ltext, kv_compact.shape[-1], device=device, dtype=kv_compact.dtype)
-    padded_hidden_state[0, :lens[0]] = kv_compact
-
-    # Reconstruct attention mask
-    attention_mask = torch.zeros(B, Ltext, device=device, dtype=torch.bool)
-    attention_mask[0, :lens[0]] = True
-
-    return padded_hidden_state, attention_mask
-
-def format_kwargs_for_deepcompressor(pos_tuple, model, timestep_val, device):
-    """
-    Formats kwargs using the positive prompt and the model's internal
-    learned unconditional embedding.
-    """
-    # 1. Unpack the positive prompt tuple to get its padded tensors
-    pos_hidden_state, pos_attention_mask = unpack_single_tuple(pos_tuple, device)
-
-    # 2. Get the model's learned unconditional embedding
-    # It's typically a single embedding vector. Shape: [1, Channels]
-    uncond_embedding = model.cfg_uncond.to(device)
-
-    # 3. Create the unconditional hidden state and attention mask
-    # We'll create a tensor with a sequence length of 1 for the unconditional part
-    neg_hidden_state = uncond_embedding[None, :pos_hidden_state.shape[1]] 
-    neg_attention_mask = torch.ones(1, pos_hidden_state.shape[1], device=device) 
-
-    # 4. Pad both positive and negative tensors to the same max sequence length
-    #max_len = pos_hidden_state.shape[1] # The positive prompt determines the max length
-
-    # Pad the negative/unconditional part to match the positive part's length
-    #pos_pad_len = neg_hidden_state.shape[1] - max_len
-    #pos_hidden_state = F.pad(pos_hidden_state, (0, 0, 0, pos_pad_len))
-    #pos_attention_mask = F.pad(pos_attention_mask, (0, pos_pad_len))
-
-    # 5. Stack them to create the final batch for CFG
-    # The Infinity code does `torch.cat((kv_compact, kv_compact_un), ...)`
-    # This means the POSITIVE embedding comes FIRST in the batch.
-    final_hidden_state = torch.cat([pos_hidden_state, neg_hidden_state], dim=0)
-    final_attention_map = torch.cat([pos_attention_mask, neg_attention_mask], dim=0)
-
-    return {
-        'encoder_hidden_state': final_hidden_state.to(torch.float32),
-        'encoder_attention_map': final_attention_map.to(torch.float32),
-        'timestep': torch.tensor([timestep_val], device=device),
-        'return_dict': False
-    }
-
 
 # --- 1. Create a Child Class for Calibration ---
-class InfinityForCalibration(Infinity):
+class StatefulInfinity(Infinity):
     """
-    Inherits from the original Infinity model to override the inference method
-    for the specific purpose of data collection.
+    An Infinity model subclass designed for stateful data collection.
+    It hooks into the autoregressive loop to capture the complete
+    state required to replay a forward pass at any given step.
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.input_cache = []
-        self.output_cache = []
+        # This will store the state for ONE image generation.
+        self.kv_delta_cache = {}
+        self.caches_dirpath = ''
+        self.filename = ''
 
-    def clear_cache(self):
-        self.input_cache.clear()
-        self.output_cache.clear()
+    def _capture_kv_delta_hook(self, layer_name, module, input, output):
+        """The hook function that will be attached to each PatchedSelfAttention layer."""
+        # The hook captures the *output* of the K and V projection layers.
+        # We assume the patched forward pass computes k and v from hidden_states.
+        # This needs to capture the `k` and `v` variables from within the attention forward pass.
+        # Let's adjust the PatchedSelfAttention to make this easier.
+        # For now, let's assume we can get k and v.
+        # In a real implementation, we might need to modify the patched attention to store them.
+        k, v = output # This assumes the attention layer returns (out, k, v)
+        self.kv_delta_cache[layer_name] = {
+            'k_delta': k.detach().cpu(),
+            'v_delta': v.detach().cpu()
+        }
+
+    @contextmanager
+    def _register_delta_hooks(self):
+        """A context manager to register and remove hooks automatically."""
+        hooks = []
+        try:
+            for name, module in self.named_modules():
+                if isinstance(module, CrossAttnBlock):
+                    # We attach the hook to the self-attention submodule
+                    sa_layer = module.sa
+                    hook = sa_layer.register_forward_hook(
+                        lambda mod, inp, outp, n=name: self._capture_kv_delta_hook(f"{n}.sa", mod, inp, outp)
+                    )
+                    hooks.append(hook)
+            yield
+        finally:
+            for hook in hooks:
+                hook.remove()
 
     def autoregressive_infer_cfg(
         self,
@@ -222,11 +199,6 @@ class InfinityForCalibration(Infinity):
         summed_codes = 0
         for si, pn in enumerate(scale_schedule):
             cfg = cfg_list[si]
-            
-            # *** CAPTURE INPUT FOR THIS STEP ***
-            # This is the `last_stage` tensor right before it enters the transformer blocks.
-            # Its channel size is 2048, which is what we need.
-            self.input_cache.append(last_stage.cpu().detach())
 
             if si >= trunk_scale:
                 break
@@ -242,25 +214,39 @@ class InfinityForCalibration(Infinity):
 
             # assert self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].sum() == 0, f'AR with {(self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L] != 0).sum()} / {self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].numel()} mask item'
             layer_idx = 0
-            for block_idx, b in enumerate(self.block_chunks):
-                # last_stage shape: [4, 1, 2048], cond_BD_or_gss.shape: [4, 1, 6, 2048], ca_kv[0].shape: [64, 2048], ca_kv[1].shape [5], ca_kv[2]: int
-                if self.add_lvl_embeding_only_first_block and block_idx == 0:
-                    last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
-                if not self.add_lvl_embeding_only_first_block: 
-                    last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
-                
-                for m in b.module:
-                    last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si)
-                    if (cfg != 1) and (layer_idx in abs_cfg_insertion_layers):
-                        # print(f'add cfg={cfg} on {layer_idx}-th layer output')
-                        last_stage = cfg * last_stage[:B] + (1-cfg) * last_stage[B:]
-                        last_stage = torch.cat((last_stage, last_stage), 0)
-                    layer_idx += 1
+            # Reset the temporary delta cache for this step
+            self.kv_delta_cache = {}
 
-            # *** CAPTURE OUTPUT FOR THIS STEP ***
-            # This is the final `last_stage` tensor after all blocks have processed it,
-            # right before it goes to the prediction head.
-            self.output_cache.append(last_stage.cpu().detach())
+            # >>> HOOK POINT: The forward pass of the blocks will trigger our hooks <<<
+            with self._register_delta_hooks():
+                for block_idx, b in enumerate(self.block_chunks):
+                    # last_stage shape: [4, 1, 2048], cond_BD_or_gss.shape: [4, 1, 6, 2048], ca_kv[0].shape: [64, 2048], ca_kv[1].shape [5], ca_kv[2]: int
+                    if self.add_lvl_embeding_only_first_block and block_idx == 0:
+                        last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
+                    if not self.add_lvl_embeding_only_first_block: 
+                        last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
+                    
+                    for m in b.module:
+                        last_stage = m(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=None, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=self.rope2d_freqs_grid, scale_ind=si)
+                        if (cfg != 1) and (layer_idx in abs_cfg_insertion_layers):
+                            # print(f'add cfg={cfg} on {layer_idx}-th layer output')
+                            last_stage = cfg * last_stage[:B] + (1-cfg) * last_stage[B:]
+                            last_stage = torch.cat((last_stage, last_stage), 0)
+                        layer_idx += 1
+
+            current_step_state = {
+                'input_hidden_states': last_stage.detach().cpu(),
+                'cond_BD': cond_BD_or_gss.detach().cpu(),
+                'ca_kv': tree_map(lambda t: t.detach().cpu() if isinstance(t, torch.Tensor) else t, ca_kv),
+                'scale_schedule': scale_schedule,
+                'scale_ind': si,
+                'rope2d_freqs_grid': self.rope2d_freqs_grid,
+                'kv_deltas': self.kv_delta_cache, # Save the captured deltas
+            }
+            
+            # Save this single step's state to its own file
+            save_path = os.path.join(self.caches_dirpath, f"{self.filename}_step_{si:02d}.pt")
+            torch.save(current_step_state, save_path)
             
             if (cfg != 1) and add_cfg_on_logits:
                 # print(f'add cfg on add_cfg_on_logits')
@@ -360,7 +346,7 @@ def load_infinity(
     print(f'[Loading Infinity]')
     text_maxlen = 512
     with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16, cache_enabled=True), torch.no_grad():
-        infinity_test: InfinityForCalibration = InfinityForCalibration(
+        infinity_test: StatefulInfinity = StatefulInfinity(
             vae_local=vae, text_channels=text_channels, text_maxlen=text_maxlen,
             shared_aln=True, raw_scale_schedule=scale_schedule,
             checkpointing='full-block',
@@ -481,32 +467,33 @@ def process(x: torch.Tensor) -> torch.Tensor:
     return torch.from_numpy(x.float().numpy()).to(dtype)
 
 
-def collect(config: DiffusionPtqRunConfig, dataset: datasets.Dataset):
+def create_stateful_cache(config: DiffusionPtqRunConfig, dataset: datasets.Dataset):
     samples_dirpath = os.path.join(config.output.root, "samples")
     caches_dirpath = os.path.join(config.output.root, "caches")
     os.makedirs(samples_dirpath, exist_ok=True)
     os.makedirs(caches_dirpath, exist_ok=True)
 
-    infinity_model = load_transformer(vae, args)
+    text_tokenizer, text_encoder = load_tokenizer(t5_path=args.text_encoder_ckpt)
+    stateful_model = load_transformer(vae, args)
+    model = patchModel(stateful_model) # Use the patching function from your struct file
 
     batch_size = config.eval.batch_size
     print(f"In total {len(dataset)} samples")
     print(f"Evaluating with batch size {batch_size}")
 
-    # --- 3. Loop through prompts and run generation ---
+    # --- Loop through prompts and run generation ---
     for batch in tqdm(dataset.iter(batch_size=1), desc="Generating and Collecting Data"):
         prompt = batch["prompt"][0]
         filename = batch["filename"][0]
 
-        # --- 1. Encode ONLY the positive prompt ---
-        pos_tuple = encode_prompt(text_tokenizer, text_encoder, prompt)
-        
-        infinity_model.clear_cache()
+        # Clear the model's internal cache for each new prompt
+        model.caches_dirpath = caches_dirpath  # Set the directory for saving caches
+        model.filename = filename  # Set the filename for saving caches
 
         with torch.no_grad():
             # Pass the calibration-enabled model to your generation function
             generated_image = gen_one_img(
-                infinity_model, vae, text_tokenizer, text_encoder, prompt,
+                model, vae, text_tokenizer, text_encoder, prompt,
                 g_seed=hash_str_to_int(filename),
                 cfg_insertion_layer=[args.cfg_insertion_layer],
                 scale_schedule=scale_schedule,
@@ -516,59 +503,11 @@ def collect(config: DiffusionPtqRunConfig, dataset: datasets.Dataset):
                 sampling_per_bits=args.sampling_per_bits,
                 enable_positive_prompt=0
             )
-
-        # --- 4. Save the collected caches for this image ---
-        num_steps = len(infinity_model.output_cache)
-        print(f"  Collected data for {num_steps} autoregressive steps.")
         
         if generated_image is not None and isinstance(generated_image, torch.Tensor):
              cv2.imwrite(os.path.join(samples_dirpath, f"{filename}.png"), generated_image.cpu().numpy())
-        
-        if len(infinity_model.input_cache) != num_steps:
-             print(f"Warning: Mismatch between captured inputs ({len(infinity_model.input_cache)}) and outputs ({num_steps}). Skipping save.")
-             continue
 
-        for step_idx in range(num_steps):
-            # Split the guided and unguided data along the batch dimension
-            # Assumes guided is the first half, unguided is the second.
-            # The original batch size 'B' in autoregressive_infer_cfg was 1. 
-            # With CFG, the tensor batch size is 2.
-            
-            # Input tensor shape is likely [2, SeqLen, Channels]
-            input_tensors = torch.chunk(infinity_model.input_cache[step_idx], 2, dim=0)
-            # Output tensor shape is also likely [2, SeqLen, Channels]
-            output_tensors = torch.chunk(infinity_model.output_cache[step_idx], 2, dim=0)
-            # Text Embeddings
-            kwargs_dict = format_kwargs_for_deepcompressor(
-                pos_tuple, infinity_model, step_idx, 'cuda'
-            )
-            
-            # Save GUIDED cache (guidance=1)
-            guided_cache = {
-                'input_args': (input_tensors[0],),  # First half of the batch
-                'input_kwargs': kwargs_dict,
-                'output': output_tensors[0], 
-                'filename': filename,
-                'step': step_idx,
-                'guidance': 1 
-            }
-            save_path_guided = os.path.join(caches_dirpath, f"{filename}-{step_idx:03d}-1.pt")
-            torch.save(guided_cache, save_path_guided)
-
-            # Save UNGUIDED cache (guidance=0)
-            unguided_cache = {
-                'input_args': (input_tensors[1],), # Second half of the batch
-                'input_kwargs': kwargs_dict,
-                'output': output_tensors[1],
-                'filename': filename,
-                'step': step_idx,
-                'guidance': 0
-            }
-            save_path_unguided = os.path.join(caches_dirpath, f"{filename}-{step_idx:03d}-0.pt")
-            torch.save(unguided_cache, save_path_unguided)
-
-        print("\n✅ Calibration data collection finished.")
-
+    print(f"\n✅ Stateful calibration data saved to {caches_dirpath}")
 
 
 
@@ -626,4 +565,4 @@ if __name__ == "__main__":
 
     ptq_config.output.root = collect_dirpath
     os.makedirs(ptq_config.output.root, exist_ok=True)
-    collect(ptq_config, dataset=dataset)
+    create_stateful_cache(ptq_config, dataset=dataset)
