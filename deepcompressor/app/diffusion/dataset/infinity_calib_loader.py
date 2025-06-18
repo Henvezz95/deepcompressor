@@ -1,11 +1,15 @@
-# infinity_calib_manager.py
+# deepcompressor/app/diffusion/dataset/infinity_calib_loader.py
 
 import torch
 import torch.nn as nn
 import os
+import re
 from tqdm import tqdm
 from collections import defaultdict
+import typing as tp
+from torch.utils.data import Dataset, DataLoader
 
+# --- FIX: Added ModuleForwardInput to the import list ---
 from deepcompressor.data.cache import (
     IOTensorsCache,
     ModuleForwardInput,
@@ -14,51 +18,59 @@ from deepcompressor.data.cache import (
 )
 
 # Import necessary components from your project
-from deepcompressor.app.diffusion.nn.struct_infinity import Infinity, DiTStruct, CrossAttnBlock
-from torch.utils.data import Dataset
+from deepcompressor.app.diffusion.nn.struct_infinity import InfinityStruct
+from deepcompressor.app.diffusion.nn.struct import DiffusionBlockStruct, DiffusionModuleStruct
 
 class InfinityStatefulCalibDataset(Dataset):
     """
     A custom Dataset class to load and organize the stateful cache created
-    by our 'Writer' script. It intelligently groups the captured states by
-    layer name and autoregressive scale index.
+    by our 'Writer' script. It organizes all step data by prompt, allowing for
+    efficient history reconstruction.
     """
-    def __init__(self, cache_dir: str, model_struct: DiTStruct):
+    def __init__(self, cache_dir: str):
         super().__init__()
-        self.data_by_layer_and_scale = defaultdict(lambda: defaultdict(list))
-        self.layer_names = [name for name, _ in model_struct.named_modules()]
-
+        # This will store all step data, organized by the original prompt filename.
+        # Structure: { "prompt_filename_001": {0: step_0_state, 1: step_1_state, ...}, ... }
+        self.histories_by_prompt = defaultdict(dict)
+        
         print(f"Loading and indexing stateful cache from: {cache_dir}")
         filepaths = [os.path.join(cache_dir, f) for f in os.listdir(cache_dir) if f.endswith(".pt")]
         
+        # Regex to extract prompt filename and step index from the cache file path
+        pattern = re.compile(r"(.+)_step_(\d+)\.pt$")
+
         for filepath in tqdm(filepaths, desc="Indexing cache files"):
-            # Each file contains the history for one image generation
-            generation_history = torch.load(filepath, map_location='cpu')
+            match = pattern.search(os.path.basename(filepath))
+            if not match:
+                continue
             
-            for step_state in generation_history:
-                scale_ind = step_state['scale_ind']
-                
-                # For this step, add an entry for every layer in the model.
-                # The data is the same for all layers, but this structure makes
-                # retrieval in the manager class much simpler.
-                for layer_name in self.layer_names:
-                    self.data_by_layer_and_scale[layer_name][scale_ind].append(step_state)
+            prompt_filename, step_str = match.groups()
+            step_index = int(step_str)
+            
+            step_state = torch.load(filepath, map_location='cpu')
+            self.histories_by_prompt[prompt_filename][step_index] = step_state
+            
+        # Create a flat list of all unique (prompt_filename, step_index) pairs for iteration
+        self._flat_lookup = sorted([
+            (prompt, step)
+            for prompt, history in self.histories_by_prompt.items()
+            for step in history.keys()
+        ])
+
+    def __len__(self) -> int:
+        return len(self._flat_lookup)
+
+    def __getitem__(self, idx: int) -> dict:
+        prompt_filename, step_index = self._flat_lookup[idx]
+        return {
+            'prompt_filename': prompt_filename,
+            'step_index': step_index,
+            'step_state': self.histories_by_prompt[prompt_filename][step_index]
+        }
         
-        # Create a flat list for __getitem__ and __len__
-        self._flat_data = []
-        for layer_name in self.data_by_layer_and_scale:
-            for scale_ind in self.data_by_layer_and_scale[layer_name]:
-                for item in self.data_by_layer_and_scale[layer_name][scale_ind]:
-                    self._flat_data.append(item)
-
-    def __len__(self):
-        return len(self._flat_data)
-
-    def __getitem__(self, idx):
-        return self._flat_data[idx]
-
-    def get_data_for_layer_and_scale(self, layer_name, scale_ind):
-        return self.data_by_layer_and_scale.get(layer_name, {}).get(scale_ind, [])
+    def get_step_state(self, prompt_filename: str, step_index: int) -> dict | None:
+        """Efficiently retrieves the state for a specific prompt and step."""
+        return self.histories_by_prompt.get(prompt_filename, {}).get(step_index)
 
 
 class InfinityCalibManager:
@@ -67,139 +79,149 @@ class InfinityCalibManager:
     generator that yields perfectly prepared, stateful, and homogeneous batches
     of data for each layer at each scale, which the quantization algorithms can consume.
     """
-    def __init__(self, model: Infinity, cache_dir: str, batch_size: int):
-        self.model = model
-        self.model_struct = DiTStruct.construct(model)
+    def __init__(self, model: InfinityStruct, cache_dir: str, batch_size: int):
+        self.model_struct = model
         self.batch_size = batch_size
-        self.dataset = InfinityStatefulCalibDataset(cache_dir, self.model_struct)
+        self.dataset = InfinityStatefulCalibDataset(cache_dir)
 
-    def collate_fn(self, batch_list: list[dict]):
-        """
-        Custom collate function to stack the dictionaries of tensors into a single batch dictionary.
-        """
+    def _collate_step_states(self, batch_list: list[dict]) -> dict | None:
+        """Custom collate function to stack a list of step_state dictionaries."""
         if not batch_list:
             return None
         
-        # Collate simple tensors and other data types
-        collated = {key: [d[key] for d in batch_list] for key in batch_list[0] if key not in ['kv_deltas']}
-        collated['input_hidden_states'] = torch.stack(collated['input_hidden_states'])
-        collated['cond_BD'] = torch.stack(collated['cond_BD'])
+        collated = {}
+        first_state = batch_list[0]['step_state']
         
-        # Collate the ca_kv tuple
-        ca_kv_list = collated.pop('ca_kv')
-        collated['ca_kv'] = (
-            torch.cat([item[0] for item in ca_kv_list], dim=0),
-            torch.cat([item[1] for item in ca_kv_list], dim=0),
-            max([item[2] for item in ca_kv_list])
-        )
-
-        # Collate the nested kv_deltas dictionary
-        kv_deltas_list = [d['kv_deltas'] for d in batch_list]
-        collated_deltas = defaultdict(lambda: defaultdict(list))
-        if kv_deltas_list:
-            for d in kv_deltas_list:
-                for layer_name, tensors in d.items():
-                    collated_deltas[layer_name]['k_delta'].append(tensors['k_delta'])
-                    collated_deltas[layer_name]['v_delta'].append(tensors['v_delta'])
+        for key in first_state:
+            items_to_collate = [d['step_state'][key] for d in batch_list]
             
-            final_deltas = {}
-            for layer_name, tensors in collated_deltas.items():
-                final_deltas[layer_name] = {
-                    'k_delta': torch.stack(tensors['k_delta']),
-                    'v_delta': torch.stack(tensors['v_delta'])
+            if isinstance(first_state[key], torch.Tensor):
+                collated[key] = torch.stack(items_to_collate)
+            elif isinstance(first_state[key], tuple) and key == 'ca_kv':
+                collated[key] = (
+                    torch.cat([item[0] for item in items_to_collate], dim=0),
+                    torch.cumsum(torch.tensor([0] + [item[0].shape[0] for item in items_to_collate[:-1]]), dim=0),
+                    max([item[2] for item in items_to_collate])
+                )
+            elif isinstance(first_state[key], dict) and key == 'kv_deltas':
+                collated_deltas = defaultdict(lambda: {'k_delta': [], 'v_delta': []})
+                for d in items_to_collate:
+                    for layer_name, tensors in d.items():
+                        collated_deltas[layer_name]['k_delta'].append(tensors['k_delta'])
+                        collated_deltas[layer_name]['v_delta'].append(tensors['v_delta'])
+                
+                collated[key] = {
+                    layer_name: {
+                        # Concat along the batch dimension (dim=0)
+                        'k_delta': torch.cat(tensors['k_delta'], dim=0),
+                        'v_delta': torch.cat(tensors['v_delta'], dim=0)
+                    } for layer_name, tensors in collated_deltas.items()
                 }
-            collated['kv_deltas'] = final_deltas
-        else:
-            collated['kv_deltas'] = {}
-            
+            else:
+                collated[key] = items_to_collate[0]
+
         return collated
 
-    def set_kv_cache_from_deltas(self, batched_kv_deltas):
+    def _reconstruct_and_set_kv_cache(self, batch: list[dict], current_scale_ind: int):
         """
-        Reconstructs the KV cache for the current step by iterating through
-        all previous steps' deltas and concatenating them.
+        Correctly reconstructs the full KV cache for each item in the batch
+        by fetching and concatenating all previous step deltas.
         """
-        # This is a simplified placeholder. A real implementation would need to
-        # know the current step index to concatenate deltas from all prior steps.
-        # For now, we assume this function correctly sets the model's KV cache.
-        for layer_name, deltas in batched_kv_deltas.items():
-            module = dict(self.model.named_modules())[layer_name]
-            module.cached_k = deltas['k_delta']
-            module.cached_v = deltas['v_delta']
+        device = next(self.model_struct.module.parameters()).device
+        
+        # Get all unique attention layer names from the model structure
+        attention_layer_names = [
+            f"{block.rname}.sa" for block in self.model_struct.iter_transformer_block_structs()
+        ]
+
+        for layer_name in attention_layer_names:
+            batch_k_list, batch_v_list = [], []
+            for item_context in batch:
+                prompt_filename = item_context['prompt_filename']
+                
+                history_k, history_v = [], []
+                for step in range(current_scale_ind):
+                    past_state = self.dataset.get_step_state(prompt_filename, step)
+                    if past_state and layer_name in past_state['kv_deltas']:
+                        history_k.append(past_state['kv_deltas'][layer_name]['k_delta'])
+                        history_v.append(past_state['kv_deltas'][layer_name]['v_delta'])
+                
+                # Concatenate along the sequence dimension (dim=2) for a single prompt
+                full_k = torch.cat(history_k, dim=2) if history_k else None
+                full_v = torch.cat(history_v, dim=2) if history_v else None
+                batch_k_list.append(full_k)
+                batch_v_list.append(full_v)
+
+            # Set the reconstructed cache on the live model for the whole batch
+            attention_module = self.model_struct.get_module(layer_name)
+            if any(k is not None for k in batch_k_list):
+                attention_module.cached_k = torch.cat(batch_k_list, dim=0).to(device)
+            else:
+                attention_module.cached_k = None
+            
+            if any(v is not None for v in batch_v_list):
+                attention_module.cached_v = torch.cat(batch_v_list, dim=0).to(device)
+            else:
+                attention_module.cached_v = None
 
     def iter_for_quantization(self):
         """
-        The main generator function. This REPLACES the framework's default
-        `iter_layer_activations` function.
+        The main generator. It efficiently replays the forward pass once per block
+        and yields the captured inputs for each submodule.
         """
-        device = next(self.model.parameters()).device
+        device = next(self.model_struct.module.parameters()).device
         
-        # Iterate through each transformer block in the model
-        for block_struct in tqdm(self.model_struct.iter_transformer_block_structs(), desc="Blocks"):
+        data_by_scale = defaultdict(list)
+        for idx in range(len(self.dataset)):
+            data_by_scale[self.dataset._flat_lookup[idx][1]].append(self.dataset[idx])
+
+        for scale_ind in sorted(data_by_scale.keys()):
+            scale_specific_data = data_by_scale[scale_ind]
             
-            # For each block, get all its submodules (sa, ca, ffn)
-            for submodule_name, submodule in block_struct.iter_submodules():
-                layer_name = f"{block_struct.rname}.{submodule_name}"
-                
-                # For each submodule, iterate through the autoregressive scales we have data for
-                for scale_ind in sorted(self.dataset.data_by_layer_and_scale.get(layer_name, {}).keys()):
-                    
-                    scale_data = self.dataset.get_data_for_layer_and_scale(layer_name, scale_ind)
-                    
-                    # Create mini-batches from this homogeneous data
-                    for i in range(0, len(scale_data), self.batch_size):
-                        batch_list = scale_data[i: i + self.batch_size]
+            dataloader = DataLoader(scale_specific_data, batch_size=self.batch_size, collate_fn=lambda b: b)
+
+            for batch_list in tqdm(dataloader, desc=f"Scale {scale_ind}", leave=False):
+                self._reconstruct_and_set_kv_cache(batch_list, scale_ind)
+
+                batch_dict = self._collate_step_states(batch_list)
+                if not batch_dict: continue
+
+                block_input = batch_dict['input_hidden_states'].to(device)
+                block_kwargs = {
+                    'cond_BD': batch_dict['cond_BD'].to(device),
+                    'ca_kv': tuple(t.to(device) if isinstance(t, torch.Tensor) else t for t in batch_dict['ca_kv']),
+                    'scale_schedule': batch_dict['scale_schedule'],
+                    'scale_ind': batch_dict['scale_ind'],
+                    'rope2d_freqs_grid': batch_dict['rope2d_freqs_grid']
+                }
+
+                for block_struct in self.model_struct.iter_transformer_block_structs():
+                    with torch.no_grad():
+                        submodule_inputs_cache = {}
+                        hooks = []
                         
-                        # Collate the list of dicts into a single batch dict
-                        batch_dict = self.collate_fn(batch_list)
-                        if batch_dict is None: continue
+                        def get_hook(name):
+                            def hook_fn(module, input, output):
+                                # --- FIX: Use ModuleForwardInput to capture only inputs ---
+                                submodule_inputs_cache[name] = ModuleForwardInput(args=(input[0].detach().cpu(),))
+                            return hook_fn
 
-                        # --- Replay the forward pass to get correct internal inputs ---
-                        with torch.no_grad():
-                            # 1. Reconstruct and set the KV cache for this step
-                            #    (A more advanced version would concat all prior deltas)
-                            self.set_kv_cache_from_deltas(batch_dict['kv_deltas'])
-
-                            # 2. Prepare all inputs for the block's forward pass
-                            block_input = batch_dict['input_hidden_states'].to(device)
-                            block_kwargs = {
-                                'cond_BD': batch_dict['cond_BD'].to(device),
-                                'ca_kv': tuple(t.to(device) if isinstance(t, torch.Tensor) else t for t in batch_dict['ca_kv']),
-                                'scale_schedule': batch_dict['scale_schedule'][0], # Same for all in batch
-                                'scale_ind': batch_dict['scale_ind'][0],
-                                'rope2d_freqs_grid': batch_dict['rope2d_freqs_grid'][0]
-                            }
-
-                            # 3. Create a temporary cache to capture inputs for each submodule
-                            temp_cache = {}
-                            hooks = []
-                            
-                            def get_hook(name):
-                                def hook_fn(module, input, output):
-                                    # Create an IOTensorsCache on the fly
-                                    temp_cache[name] = IOTensorsCache(
-                                        inputs=TensorsCache.from_dict({'hidden_states': input[0].detach().cpu()}),
-                                        outputs=TensorCache(output.detach().cpu())
-                                    )
-                                return hook_fn
-
-                            for name, mod in block_struct.module.named_modules():
-                                if name in ['sa', 'ca', 'ffn']:
-                                    hooks.append(mod.register_forward_hook(get_hook(name)))
-                            
-                            # 4. Run the forward pass for the *entire block*
-                            block_struct.module(block_input, **block_kwargs)
-                            
-                            # 5. Remove hooks
-                            for h in hooks:
-                                h.remove()
+                        for sub_name, sub_mod in block_struct.iter_submodules():
+                             # Ensure we only attach to the modules we need
+                            if sub_name in ['sa', 'ca', 'ffn']:
+                                hooks.append(sub_mod.register_forward_hook(get_hook(sub_name)))
                         
-                        # 6. Yield the captured data for the target submodule
-                        yield (
-                            layer_name,
-                            (
-                                block_struct,  # The struct for the whole block
-                                temp_cache,    # The cache with inputs/outputs for each submodule
-                                {}             # Empty kwargs
+                        block_struct.module(block_input, **block_kwargs)
+                        
+                        for h in hooks:
+                            h.remove()
+                    
+                    for submodule_name, submodule_struct in block_struct.iter_submodule_structs():
+                        if submodule_name in submodule_inputs_cache:
+                            # The key for the cache should match the submodule name in iter_submodule_structs
+                            layer_cache = {'default': submodule_inputs_cache[submodule_name]}
+                            yield (
+                                f"{block_struct.rname}.{submodule_name}",
+                                (submodule_struct, layer_cache, {})
                             )
-                        )
+
