@@ -82,20 +82,32 @@ class StatefulInfinity(Infinity):
         self.kv_delta_cache = {}
         self.caches_dirpath = ''
         self.filename = ''
+        
 
     def _capture_kv_delta_hook(self, layer_name, module, input, output):
         """The hook function that will be attached to each PatchedSelfAttention layer."""
-        # The hook captures the *output* of the K and V projection layers.
-        # We assume the patched forward pass computes k and v from hidden_states.
-        # This needs to capture the `k` and `v` variables from within the attention forward pass.
-        # Let's adjust the PatchedSelfAttention to make this easier.
-        # For now, let's assume we can get k and v.
-        # In a real implementation, we might need to modify the patched attention to store them.
-        k, v = output # This assumes the attention layer returns (out, k, v)
+
+        # --- START OF FIX ---
+        # The 'module' argument is the PatchedSelfAttention instance that triggered the hook.
+        # We now access the k and v tensors from the temporary attributes we just added.
+        k = module.last_k
+        v = module.last_v
+
+        # It's good practice to check that the attributes were set
+        if k is None or v is None:
+            raise RuntimeError(f"Hook for layer {layer_name} did not find last_k or last_v.")
+        # --- END OF FIX ---
+
         self.kv_delta_cache[layer_name] = {
             'k_delta': k.detach().cpu(),
             'v_delta': v.detach().cpu()
         }
+
+        # --- OPTIONAL BUT RECOMMENDED ---
+        # Clean up the temporary attributes after capture to prevent potential memory leaks
+        # and ensure a clean state for the next step.
+        module.last_k = None
+        module.last_v = None
 
     @contextmanager
     def _register_delta_hooks(self):

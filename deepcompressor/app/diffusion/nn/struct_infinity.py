@@ -91,6 +91,10 @@ class PatchedSelfAttention(Attention):
         self.cached_k = None
         self.cached_v = None
 
+        # Add these new attributes for the hook
+        self.last_k = None
+        self.last_v = None
+
         # --- THIS IS THE FIX ---
         # Add a .proj attribute for compatibility with the InfinityAttentionStruct parser.
         self.proj = self.to_out[0]
@@ -121,6 +125,12 @@ class PatchedSelfAttention(Attention):
 
         if rope2d_freqs_grid is not None:
             q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind)
+
+        # --- START OF FIX ---
+        # Store k and v as temporary attributes for the hook to capture
+        self.last_k = k
+        self.last_v = v
+        # --- END OF FIX ---
 
         if self.caching:
             if self.cached_k is None:
@@ -340,19 +350,69 @@ class InfinityStruct(DiTStruct):
             transformer_blocks_rname="block_chunks", norm_out_rname="head_nm", proj_out_rname="head",
         )
 
+
+DiffusionAttentionStruct.register_factory((SelfAttention, CrossAttention), InfinityAttentionStruct._default_construct)
+DiffusionFeedForwardStruct.register_factory((FFN, FFNSwiGLU), InfinityFeedForwardStruct._default_construct)
+DiffusionTransformerBlockStruct.register_factory(CrossAttnBlock, InfinityTransformerBlockStruct._default_construct)
+DiTStruct.register_factory(Infinity, InfinityStruct._default_construct)
+DiffusionAttentionStruct.register_factory((PatchedSelfAttention, PatchedCrossAttention), InfinityAttentionStruct._default_construct)
+# And as a fallback, register with the absolute base class as you suggested.
+BaseModuleStruct.register_factory(Infinity, InfinityStruct._default_construct)
+
+'''
+
+#BaseModuleStruct.register_factory(Infinity, InfinityStruct._default_construct)
+
 def register_factories():
     """
-    Register the InfinityStruct and its components with the deepcompressor framework.
-    This allows the framework to recognize and construct Infinity models correctly.
+    Idempotent function to register the InfinityStruct and its components
+    with the deepcompressor framework. It checks for existence before
+    registering to prevent overwriting and allow safe re-execution.
     """
-    # Register our lower-level factories so the framework can find them when DiTStruct builds its children
-    DiffusionAttentionStruct.register_factory((SelfAttention, CrossAttention), InfinityAttentionStruct._default_construct)
-    DiffusionFeedForwardStruct.register_factory((FFN, FFNSwiGLU), InfinityFeedForwardStruct._default_construct)
-    DiffusionTransformerBlockStruct.register_factory(CrossAttnBlock, InfinityTransformerBlockStruct._default_construct)
-    DiTStruct.register_factory(Infinity, InfinityStruct._default_construct)
-    DiffusionAttentionStruct.register_factory((PatchedSelfAttention, PatchedCrossAttention), InfinityAttentionStruct._default_construct)
-    # And as a fallback, register with the absolute base class as you suggested.
-    BaseModuleStruct.register_factory(Infinity, InfinityStruct._default_construct)
+    # Define all registrations in a structured list for clarity and maintainability.
+    # Each tuple contains: (StructClass, (ModuleType(s)), FactoryFunction)
+    registrations = [
+        (
+            DiffusionAttentionStruct,
+            (SelfAttention, CrossAttention, PatchedSelfAttention, PatchedCrossAttention),
+            InfinityAttentionStruct._default_construct
+        ),
+        (
+            DiffusionFeedForwardStruct,
+            (FFN, FFNSwiGLU),
+            InfinityFeedForwardStruct._default_construct
+        ),
+        (
+            DiffusionTransformerBlockStruct,
+            CrossAttnBlock,
+            InfinityTransformerBlockStruct._default_construct
+        ),
+        (
+            DiTStruct,
+            Infinity,
+            InfinityStruct._default_construct
+        ),
+        (
+            BaseModuleStruct,
+            InfinityStruct,
+            lambda module, **kwargs: module
+        )
+    ]
+
+    # Loop through and register safely
+    for struct_cls, module_types, factory_fn in registrations:
+        # Ensure module_types is always iterable, even if it's a single class
+        if not isinstance(module_types, (list, tuple)):
+            module_types = (module_types,)
+        
+        for module_type in module_types:
+            # THE KEY CHANGE: Check if the specific module type is already a key
+            # in the struct's factory dictionary before registering.
+            if module_type not in struct_cls._factories:
+                struct_cls.register_factory(module_type, factory_fn)
+    
+    #BaseModuleStruct.register_factory(Infinity, InfinityStruct._default_construct)
+'''
 
 def patchModel(model: Infinity) -> nn.Module:
     """
@@ -379,7 +439,6 @@ def patchModel(model: Infinity) -> nn.Module:
 
 # --- Main Test Execution ---
 def main():
-    register_factories()
     print("--- Loading a real Infinity model from checkpoint ---")
     
     args = argparse.Namespace(
