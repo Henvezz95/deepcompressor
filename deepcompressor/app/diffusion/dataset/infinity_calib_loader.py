@@ -7,221 +7,176 @@ import re
 from tqdm import tqdm
 from collections import defaultdict
 import typing as tp
-from torch.utils.data import Dataset, DataLoader
+import gc
+from collections import defaultdict, OrderedDict
+from functools import partial
 
-# --- FIX: Added ModuleForwardInput to the import list ---
-from deepcompressor.data.cache import (
-    IOTensorsCache,
-    ModuleForwardInput,
-    TensorCache,
-    TensorsCache,
-)
-
-# Import necessary components from your project
+from deepcompressor.data.cache import IOTensorsCache, TensorsCache, TensorCache
 from deepcompressor.app.diffusion.nn.struct_infinity import InfinityStruct
-from deepcompressor.app.diffusion.nn.struct import DiffusionBlockStruct, DiffusionModuleStruct
-
-class InfinityStatefulCalibDataset(Dataset):
-    """
-    A custom Dataset class to load and organize the stateful cache created
-    by our 'Writer' script. It organizes all step data by prompt, allowing for
-    efficient history reconstruction.
-    """
-    def __init__(self, cache_dir: str):
-        super().__init__()
-        # This will store all step data, organized by the original prompt filename.
-        # Structure: { "prompt_filename_001": {0: step_0_state, 1: step_1_state, ...}, ... }
-        self.histories_by_prompt = defaultdict(dict)
-        
-        print(f"Loading and indexing stateful cache from: {cache_dir}")
-        filepaths = [os.path.join(cache_dir, f) for f in os.listdir(cache_dir) if f.endswith(".pt")]
-        
-        # Regex to extract prompt filename and step index from the cache file path
-        pattern = re.compile(r"(.+)_step_(\d+)\.pt$")
-
-        for filepath in tqdm(filepaths, desc="Indexing cache files"):
-            match = pattern.search(os.path.basename(filepath))
-            if not match:
-                continue
-            
-            prompt_filename, step_str = match.groups()
-            step_index = int(step_str)
-            
-            step_state = torch.load(filepath, map_location='cpu')
-            self.histories_by_prompt[prompt_filename][step_index] = step_state
-            
-        # Create a flat list of all unique (prompt_filename, step_index) pairs for iteration
-        self._flat_lookup = sorted([
-            (prompt, step)
-            for prompt, history in self.histories_by_prompt.items()
-            for step in history.keys()
-        ])
-
-    def __len__(self) -> int:
-        return len(self._flat_lookup)
-
-    def __getitem__(self, idx: int) -> dict:
-        prompt_filename, step_index = self._flat_lookup[idx]
-        return {
-            'prompt_filename': prompt_filename,
-            'step_index': step_index,
-            'step_state': self.histories_by_prompt[prompt_filename][step_index]
-        }
-        
-    def get_step_state(self, prompt_filename: str, step_index: int) -> dict | None:
-        """Efficiently retrieves the state for a specific prompt and step."""
-        return self.histories_by_prompt.get(prompt_filename, {}).get(step_index)
-
+from deepcompressor.app.diffusion.nn.struct import DiffusionBlockStruct
 
 class InfinityCalibManager:
     """
-    This class replaces the default `iter_layer_activations`. It provides a
-    generator that yields perfectly prepared, stateful, and homogeneous batches
-    of data for each layer at each scale, which the quantization algorithms can consume.
+    This optimized version correctly handles the stateful nature of the
+    Infinity model by iterating through prompts within a per-block loop.
+    It loads the full history for one prompt at a time to dramatically reduce
+    redundant file I/O during KV cache reconstruction.
     """
     def __init__(self, model: InfinityStruct, cache_dir: str, batch_size: int):
         self.model_struct = model
-        self.batch_size = batch_size
-        self.dataset = InfinityStatefulCalibDataset(cache_dir)
-
-    def _collate_step_states(self, batch_list: list[dict]) -> dict | None:
-        """Custom collate function to stack a list of step_state dictionaries."""
-        if not batch_list:
-            return None
+        self.cache_dir = cache_dir
         
-        collated = {}
-        first_state = batch_list[0]['step_state']
+        self.prompts = defaultdict(dict)
+        filepaths = [os.path.join(self.cache_dir, f) for f in os.listdir(self.cache_dir) if f.endswith(".pt")]
         
-        for key in first_state:
-            items_to_collate = [d['step_state'][key] for d in batch_list]
+        pattern = re.compile(r"(.+)_step_(\d+)\.pt$")
+        for filepath in filepaths:
+            match = pattern.search(os.path.basename(filepath))
+            if not match: continue
+            prompt_filename, step_str = match.groups()
+            self.prompts[prompt_filename][int(step_str)] = filepath
             
-            if isinstance(first_state[key], torch.Tensor):
-                collated[key] = torch.stack(items_to_collate)
-            elif isinstance(first_state[key], tuple) and key == 'ca_kv':
-                collated[key] = (
-                    torch.cat([item[0] for item in items_to_collate], dim=0),
-                    torch.cumsum(torch.tensor([0] + [item[0].shape[0] for item in items_to_collate[:-1]]), dim=0),
-                    max([item[2] for item in items_to_collate])
-                )
-            elif isinstance(first_state[key], dict) and key == 'kv_deltas':
-                collated_deltas = defaultdict(lambda: {'k_delta': [], 'v_delta': []})
-                for d in items_to_collate:
-                    for layer_name, tensors in d.items():
-                        collated_deltas[layer_name]['k_delta'].append(tensors['k_delta'])
-                        collated_deltas[layer_name]['v_delta'].append(tensors['v_delta'])
-                
-                collated[key] = {
-                    layer_name: {
-                        # Concat along the batch dimension (dim=0)
-                        'k_delta': torch.cat(tensors['k_delta'], dim=0),
-                        'v_delta': torch.cat(tensors['v_delta'], dim=0)
-                    } for layer_name, tensors in collated_deltas.items()
-                }
-            else:
-                collated[key] = items_to_collate[0]
+        print(f"InfinityCalibManager initialized for {len(self.prompts)} prompts.")
 
-        return collated
-
-    def _reconstruct_and_set_kv_cache(self, batch: list[dict], current_scale_ind: int):
-        """
-        Correctly reconstructs the full KV cache for each item in the batch
-        by fetching and concatenating all previous step deltas.
-        """
-        device = next(self.model_struct.module.parameters()).device
+    def _set_kv_cache_for_step(self, model_instance, step_index, prompt_filename):
+        """Helper to reconstruct and set the KV cache for a single step."""
+        device = next(model_instance.parameters()).device
         
-        # Get all unique attention layer names from the model structure
-        attention_layer_names = [
-            f"{block.rname}.sa" for block in self.model_struct.iter_transformer_block_structs()
-        ]
+        def find_past_filepath(p_filename, p_step):
+            return os.path.join(self.cache_dir, f"{p_filename}_step_{p_step:02d}.pt")
 
-        for layer_name in attention_layer_names:
-            batch_k_list, batch_v_list = [], []
-            for item_context in batch:
-                prompt_filename = item_context['prompt_filename']
-                
-                history_k, history_v = [], []
-                for step in range(current_scale_ind):
-                    past_state = self.dataset.get_step_state(prompt_filename, step)
-                    if past_state and layer_name in past_state['kv_deltas']:
-                        history_k.append(past_state['kv_deltas'][layer_name]['k_delta'])
-                        history_v.append(past_state['kv_deltas'][layer_name]['v_delta'])
-                
-                # Concatenate along the sequence dimension (dim=2) for a single prompt
-                full_k = torch.cat(history_k, dim=2) if history_k else None
-                full_v = torch.cat(history_v, dim=2) if history_v else None
-                batch_k_list.append(full_k)
-                batch_v_list.append(full_v)
-
-            # Set the reconstructed cache on the live model for the whole batch
-            attention_module = self.model_struct.get_module(layer_name)
-            if any(k is not None for k in batch_k_list):
-                attention_module.cached_k = torch.cat(batch_k_list, dim=0).to(device)
-            else:
-                attention_module.cached_k = None
-            
-            if any(v is not None for v in batch_v_list):
-                attention_module.cached_v = torch.cat(batch_v_list, dim=0).to(device)
-            else:
-                attention_module.cached_v = None
-
-    def iter_for_quantization(self):
-        """
-        The main generator. It efficiently replays the forward pass once per block
-        and yields the captured inputs for each submodule.
-        """
-        device = next(self.model_struct.module.parameters()).device
-        
-        data_by_scale = defaultdict(list)
-        for idx in range(len(self.dataset)):
-            data_by_scale[self.dataset._flat_lookup[idx][1]].append(self.dataset[idx])
-
-        for scale_ind in sorted(data_by_scale.keys()):
-            scale_specific_data = data_by_scale[scale_ind]
-            
-            dataloader = DataLoader(scale_specific_data, batch_size=self.batch_size, collate_fn=lambda b: b)
-
-            for batch_list in tqdm(dataloader, desc=f"Scale {scale_ind}", leave=False):
-                self._reconstruct_and_set_kv_cache(batch_list, scale_ind)
-
-                batch_dict = self._collate_step_states(batch_list)
-                if not batch_dict: continue
-
-                block_input = batch_dict['input_hidden_states'].to(device)
-                block_kwargs = {
-                    'cond_BD': batch_dict['cond_BD'].to(device),
-                    'ca_kv': tuple(t.to(device) if isinstance(t, torch.Tensor) else t for t in batch_dict['ca_kv']),
-                    'scale_schedule': batch_dict['scale_schedule'],
-                    'scale_ind': batch_dict['scale_ind'],
-                    'rope2d_freqs_grid': batch_dict['rope2d_freqs_grid']
-                }
-
-                for block_struct in self.model_struct.iter_transformer_block_structs():
-                    with torch.no_grad():
-                        submodule_inputs_cache = {}
-                        hooks = []
-                        
-                        def get_hook(name):
-                            def hook_fn(module, input, output):
-                                # --- FIX: Use ModuleForwardInput to capture only inputs ---
-                                submodule_inputs_cache[name] = ModuleForwardInput(args=(input[0].detach().cpu(),))
-                            return hook_fn
-
-                        for sub_name, sub_mod in block_struct.iter_submodules():
-                             # Ensure we only attach to the modules we need
-                            if sub_name in ['sa', 'ca', 'ffn']:
-                                hooks.append(sub_mod.register_forward_hook(get_hook(sub_name)))
-                        
-                        block_struct.module(block_input, **block_kwargs)
-                        
-                        for h in hooks:
-                            h.remove()
+        for name, mod in model_instance.named_modules():
+            if hasattr(mod, 'kv_caching'):
+                if step_index == 0:
+                    mod.cached_k, mod.cached_v = None, None
+                else:
+                    history_k, history_v = [], []
+                    for prev_step in range(step_index):
+                        past_filepath = find_past_filepath(prompt_filename, prev_step)
+                        if os.path.exists(past_filepath):
+                            try:
+                                past_state = torch.load(past_filepath, map_location='cpu')
+                                if name in past_state.get('kv_deltas', {}):
+                                    history_k.append(past_state['kv_deltas'][name]['k_delta'])
+                                    history_v.append(past_state['kv_deltas'][name]['v_delta'])
+                            except (FileNotFoundError, EOFError):
+                                continue
                     
-                    for submodule_name, submodule_struct in block_struct.iter_submodule_structs():
-                        if submodule_name in submodule_inputs_cache:
-                            # The key for the cache should match the submodule name in iter_submodule_structs
-                            layer_cache = {'default': submodule_inputs_cache[submodule_name]}
-                            yield (
-                                f"{block_struct.rname}.{submodule_name}",
-                                (submodule_struct, layer_cache, {})
-                            )
+                    if history_k:
+                        mod.cached_k = torch.cat(history_k, dim=2).to(device)
+                        mod.cached_v = torch.cat(history_v, dim=2).to(device)
+                    else:
+                        mod.cached_k, mod.cached_v = None, None
 
+    def _collect_activations_for_block(self, block_struct: DiffusionBlockStruct):
+        """
+        Performs a pass over all prompts to collect activations for a single block.
+        """
+        device = next(self.model_struct.module.parameters()).device
+        aggregated_activations = defaultdict(list)
+        
+        for prompt_filename, steps in tqdm(self.prompts.items(), desc=f"Processing Prompts for {block_struct.name}", leave=False):
+            
+            prompt_history = {step: torch.load(path, map_location='cpu') for step, path in steps.items()}
+            
+            for step_index in sorted(prompt_history.keys()):
+                
+                state_dict = prompt_history[step_index]
+
+                self._set_kv_cache_for_step(self.model_struct.module, step_index, prompt_filename)
+
+                with torch.no_grad():
+                    hidden_states = state_dict['input_hidden_states'].to(device).float()
+                    block_kwargs = {
+                        'cond_BD': state_dict['cond_BD'].to(device),
+                        'ca_kv': tuple(t.to(device) if isinstance(t, torch.Tensor) else t for t in state_dict['ca_kv']),
+                        'scale_schedule': state_dict['scale_schedule'], 'scale_ind': state_dict['scale_ind'],
+                        'rope2d_freqs_grid': state_dict['rope2d_freqs_grid'], 'attn_bias_or_two_vector': None,
+                    }
+                    
+                    hooks = []
+                    def get_hook(key):
+                        def hook_fn(module, input_tuple, output):
+                            if input_tuple and isinstance(input_tuple[0], torch.Tensor):
+                                aggregated_activations[key].append(input_tuple[0])
+                        return hook_fn
+
+                    # --- START of FIX ---
+                    # 1. Hook the individual linear layers
+                    for _, module_name, module, _, _ in block_struct.named_key_modules():
+                        if isinstance(module, nn.Linear):
+                            hooks.append(module.register_forward_hook(get_hook(module_name)))
+                    
+                    # 2. ALSO hook the container modules (Attention and FFN)
+                    submodule_structs_to_process = block_struct.attn_structs + [block_struct.ffn_struct]
+                    for sub_mod_struct in submodule_structs_to_process:
+                        if sub_mod_struct:
+                            module_name = sub_mod_struct.name
+                            module_to_hook = sub_mod_struct.module
+                            hooks.append(module_to_hook.register_forward_hook(get_hook(module_name)))
+                    # --- END of FIX ---
+
+                    hidden_states = block_struct.module(hidden_states, **block_kwargs)
+
+                    for h in hooks:
+                        h.remove()
+        
+        final_layer_cache = {}
+        # Iterate through the modules we know exist in the block to package the cache.
+        for _, module_name, module, _, _ in block_struct.named_key_modules():
+            if module_name in aggregated_activations:
+                tensor_list = aggregated_activations[module_name]
+                if tensor_list:
+                    channels_dim = -1 if isinstance(module, nn.Linear) else 1
+                    tensor_cache = TensorCache(data=tensor_list, channels_dim=channels_dim)
+                    tensors_cache = TensorsCache(tensors=OrderedDict([(0, tensor_cache)]))
+                    final_layer_cache[module_name] = IOTensorsCache(inputs=tensors_cache)
+        
+        # Also package the container module activations
+        submodule_structs_to_process = block_struct.attn_structs + [block_struct.ffn_struct]
+        for sub_mod_struct in submodule_structs_to_process:
+            if sub_mod_struct and sub_mod_struct.name in aggregated_activations:
+                tensor_list = aggregated_activations[sub_mod_struct.name]
+                if tensor_list:
+                    channels_dim = -1 # Container inputs are typically (B, L, C)
+                    tensor_cache = TensorCache(data=tensor_list, channels_dim=channels_dim)
+                    tensors_cache = TensorsCache(tensors=OrderedDict([(0, tensor_cache)]))
+                    final_layer_cache[sub_mod_struct.name] = IOTensorsCache(inputs=tensors_cache)
+
+        return final_layer_cache
+
+    def iter_layer_activations(self):
+        """
+        The main generator. It iterates through each block, triggers the full
+        aggregation for it, and then yields the complete cache for that block.
+        """
+        device = next(self.model_struct.module.parameters()).device
+        for block_struct in self.model_struct.iter_transformer_block_structs():
+            # Collects the cache with all tensors on the CPU
+            cpu_aggregated_cache = self._collect_activations_for_block(block_struct)
+            
+            # --- START of FIX ---
+            # Create a new cache, moving all tensors to the correct GPU device
+            gpu_aggregated_cache = {}
+            for module_name, iot_cache in cpu_aggregated_cache.items():
+                if iot_cache.inputs:
+                    gpu_tensors_dict = OrderedDict()
+                    for key, tensor_cache in iot_cache.inputs.items():
+                        # Create a new list with tensors moved to the GPU
+                        gpu_data = [t.to(device) for t in tensor_cache.data]
+                        # Create a new TensorCache with the GPU data
+                        gpu_tensors_dict[key] = TensorCache(
+                            data=gpu_data,
+                            channels_dim=tensor_cache.channels_dim,
+                            orig_device=device # Update the original device metadata
+                        )
+                    gpu_aggregated_cache[module_name] = IOTensorsCache(inputs=TensorsCache(tensors=gpu_tensors_dict))
+            # --- END of FIX ---
+
+            yield block_struct, gpu_aggregated_cache, {}
+            
+            # Clean up memory before processing the next block
+            del cpu_aggregated_cache, gpu_aggregated_cache
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()

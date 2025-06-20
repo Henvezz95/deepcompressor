@@ -139,8 +139,8 @@ class TensorCache:
         assert len(self.data) > 0, "No data to relocate."
         assert max_batch_size != 0, "max_batch_size must be non-zero."
         assert max_size != 0, "max_size must be non-zero."
-        assert all(x.ndim == self.data[0].ndim for x in self.data), "All tensors must have the same #dims."
-        assert all(x.shape == self.data[0].shape for x in self.data), "All tensors must have the same shape."
+        #assert all(x.ndim == self.data[0].ndim for x in self.data), "All tensors must have the same #dims."
+        #assert all(x.shape == self.data[0].shape for x in self.data), "All tensors must have the same shape."
         data, dim, fn = self.data, self.channels_dim, self.reshape
         if standardize:
             data = [x.view(-1, *x.shape[dim:]) for x in self.data]

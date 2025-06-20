@@ -108,7 +108,7 @@ class BaseModuleStruct(ABC):
             # assert issubclass(module_type, nn.Module), f"{module_type} is not a subclass of nn.Module"
             if not hasattr(cls, "_factories"):
                 cls._factories = {}
-            if not overwrite:
+            if not overwrite: 
                 assert module_type not in cls._factories, f"factory for {module_type} already exists"
             cls._factories[module_type] = factory
 
@@ -142,5 +142,6 @@ class BaseModuleStruct(ABC):
             `Self`:
                 The module struct.
         """
+
         factory = cls._factories[type(module)]
         return factory(module, parent=parent, fname=fname, rname=rname, rkey=rkey, idx=idx, **kwargs)

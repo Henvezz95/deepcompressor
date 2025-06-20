@@ -59,7 +59,7 @@ args = argparse.Namespace(
     cache_dir='/dev/shm',
     checkpoint_type='torch',
     seed=0,
-    bf16=1,
+    bf16=0,
     save_file='tmp.jpg',
     enable_model_cache=0
 )

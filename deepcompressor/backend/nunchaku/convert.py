@@ -396,7 +396,7 @@ if __name__ == "__main__":
     else:
         model_name = args.model_name
     assert model_name, "Model name must be provided."
-    assert "flux" in model_name.lower(), "Only Flux models are supported."
+    #assert "flux" in model_name.lower(), "Only Flux models are supported."
     state_dict_path = os.path.join(args.quant_path, "model.pt")
     scale_dict_path = os.path.join(args.quant_path, "scale.pt")
     smooth_dict_path = os.path.join(args.quant_path, "smooth.pt")

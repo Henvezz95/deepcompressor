@@ -10,6 +10,8 @@ import argparse
 import cv2
 import numpy as np
 
+from flash_attn import flash_attn_varlen_kvpacked_func
+
 # --- Configure Python Path to Find Modules ---
 sys.path.append('./') 
 sys.path.append('./Infinity_rep') 
@@ -91,12 +93,9 @@ class PatchedSelfAttention(Attention):
         self.cached_k = None
         self.cached_v = None
 
-        # Add these new attributes for the hook
         self.last_k = None
         self.last_v = None
 
-        # --- THIS IS THE FIX ---
-        # Add a .proj attribute for compatibility with the InfinityAttentionStruct parser.
         self.proj = self.to_out[0]
 
     def kv_caching(self, enable: bool):
@@ -104,13 +103,10 @@ class PatchedSelfAttention(Attention):
         self.cached_k = None
         self.cached_v = None
 
-    def forward(self, *args, **kwargs):
-        hidden_states           = args[0]
-        attention_mask          = args[1]
-        scale_schedule          = args[3]
-        rope2d_freqs_grid       = args[4]
-        scale_ind               = kwargs.get('scale_ind', 0)
-        
+    def forward(self, hidden_states, attention_mask=None, attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, scale_ind=0, **kwargs):
+        """
+        A robust forward method that handles potentially missing non-tensor arguments.
+        """
         B, L_current, C = hidden_states.shape
         head_dim = self.inner_dim // self.heads
         
@@ -123,14 +119,8 @@ class PatchedSelfAttention(Attention):
             q = F.normalize(q, dim=-1, eps=1e-12).mul(scale_mul)
             k = F.normalize(k, dim=-1, eps=1e-12)
 
-        if rope2d_freqs_grid is not None:
+        if rope2d_freqs_grid is not None and scale_schedule is not None:
             q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind)
-
-        # --- START OF FIX ---
-        # Store k and v as temporary attributes for the hook to capture
-        self.last_k = k
-        self.last_v = v
-        # --- END OF FIX ---
 
         if self.caching:
             if self.cached_k is None:
@@ -152,7 +142,8 @@ class PatchedSelfAttention(Attention):
 
 class PatchedCrossAttention(Attention):
     """
-    Inherits from diffusers.Attention for framework compatibility.
+    Inherits from diffusers.Attention but now uses the correct variable-length
+    attention mechanism from the original Infinity model.
     """
     def __init__(self, original_ca_module: CrossAttention):
         dim_head = original_ca_module.head_dim
@@ -163,6 +154,9 @@ class PatchedCrossAttention(Attention):
             dim_head=dim_head,
             bias=True
         )
+        
+        # --- FIX: Explicitly set self.dim_head ---
+        self.dim_head = dim_head
 
         self.to_q.weight.data.copy_(original_ca_module.mat_q.weight)
         self.to_q.bias.data.copy_(original_ca_module.mat_q.bias)
@@ -171,40 +165,58 @@ class PatchedCrossAttention(Attention):
         k_w, v_w = torch.chunk(original_kv_weight, 2, dim=0)
         self.to_k.weight.data.copy_(k_w)
         self.to_v.weight.data.copy_(v_w)
-        self.to_k.bias.data.zero_()
+        
+        self.to_k.bias = None
         self.to_v.bias.data.copy_(original_ca_module.v_bias)
         
         self.to_out[0].weight.data.copy_(original_ca_module.proj.weight)
         self.to_out[0].bias.data.copy_(original_ca_module.proj.bias)
 
         self.scale = 1 / math.sqrt(dim_head)
-        
-        # --- THIS IS THE FIX ---
-        # Add a .proj attribute for compatibility with the InfinityAttentionStruct parser.
         self.proj = self.to_out[0]
 
     def forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None, **kwargs):
-        if isinstance(encoder_hidden_states, tuple):
-            context_tensor = encoder_hidden_states[0]
-        else:
-            context_tensor = encoder_hidden_states
+        """
+        This forward pass now correctly handles the variable-length context (`ca_kv`)
+        by using the specialized flash_attn_varlen_kvpacked_func, mimicking the
+        original model's behavior and avoiding the shape error.
+        """
+        if not isinstance(encoder_hidden_states, tuple):
+            raise ValueError("PatchedCrossAttention expects encoder_hidden_states to be the ca_kv tuple.")
+
+        ca_kv = encoder_hidden_states
+        kv_compact, cu_seqlens_k, max_seqlen_k = ca_kv
+        kv_compact = kv_compact.float()
         
         B_x, L_x, C = hidden_states.shape
-        head_dim = self.inner_dim // self.heads
         
-        q = self.to_q(hidden_states).view(B_x, L_x, self.heads, head_dim).transpose(1, 2)
+        q_compact = self.to_q(hidden_states).view(-1, self.heads, self.dim_head)
+
+        k_compact = self.to_k(kv_compact).view(-1, self.heads, self.dim_head)
+        v_compact = self.to_v(kv_compact).view(-1, self.heads, self.dim_head)
         
-        L_kv = context_tensor.shape[0] // B_x
+        kv_packed = torch.stack([k_compact, v_compact], dim=1).contiguous()
         
-        k = self.to_k(context_tensor).view(B_x, L_kv, self.heads, head_dim).transpose(1, 2)
-        v = self.to_v(context_tensor).view(B_x, L_kv, self.heads, head_dim).transpose(1, 2)
+        cu_seqlens_q = torch.arange(0, L_x * (B_x + 1), L_x, dtype=torch.int32, device=hidden_states.device)
+
+        # --- Cast inputs to bfloat16 for FlashAttention compatibility ---
+        oup = flash_attn_varlen_kvpacked_func(
+            q=q_compact.to(torch.bfloat16), 
+            kv=kv_packed.to(torch.bfloat16), 
+            cu_seqlens_q=cu_seqlens_q.to(torch.int32), 
+            cu_seqlens_k=cu_seqlens_k.to(torch.int32), 
+            max_seqlen_q=L_x, 
+            max_seqlen_k=max_seqlen_k, 
+            dropout_p=0, 
+            softmax_scale=self.scale
+        ).reshape(B_x, L_x, -1).float()
         
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, scale=self.scale)
-        
-        out = out.transpose(1, 2).reshape(B_x, L_x, C)
-        out = self.to_out[0](out)
+        # Output projection
+        out = self.to_out[0](oup)
         out = self.to_out[1](out)
-        return out
+        
+        # Return the output in the same dtype as the input for consistency
+        return out.to(hidden_states.dtype)
     
 
 class InfinityAttentionStruct(DiffusionAttentionStruct):
