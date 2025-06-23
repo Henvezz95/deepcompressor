@@ -42,22 +42,23 @@ def smooth_infinity_model(
     # The total number of iterations is now simply the number of blocks in the model.
     num_blocks = len(list(model.iter_transformer_block_structs()))
     
-    # 3. Iterate through the layers using the new, correct generator.
+# 3. Iterate through the layers using the new, correct generator.
     data_iterator = calib_manager.iter_layer_activations()
     
     print(f"Beginning smoothing for {num_blocks} transformer blocks...")
     with tqdm(total=num_blocks, desc="Smoothing Infinity Blocks") as pbar:
+        # --- START of FIX ---
         for block_struct, aggregated_cache, block_kwargs in data_iterator:
             
-            # 4. Apply the original smoothing algorithm to the layer.
             smooth_diffusion_layer(
                 layer=block_struct,
                 config=config,
                 smooth_cache=smooth_cache,
                 layer_cache=aggregated_cache,
-                layer_kwargs=block_kwargs,
+                layer_kwargs=block_kwargs, # Pass the kwargs containing ca_kv
             )
             pbar.update(1)
+
 
     print("\n✅ Infinity-Aware Smoothing complete.")
     return smooth_cache

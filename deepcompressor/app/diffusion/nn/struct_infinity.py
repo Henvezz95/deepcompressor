@@ -181,6 +181,10 @@ class PatchedCrossAttention(Attention):
         by using the specialized flash_attn_varlen_kvpacked_func, mimicking the
         original model's behavior and avoiding the shape error.
         """
+        ca_kv = kwargs.get('ca_kv')
+        if encoder_hidden_states is None and ca_kv is not None:
+            encoder_hidden_states = ca_kv
+            
         if not isinstance(encoder_hidden_states, tuple):
             raise ValueError("PatchedCrossAttention expects encoder_hidden_states to be the ca_kv tuple.")
 
@@ -247,7 +251,7 @@ class InfinityAttentionStruct(DiffusionAttentionStruct):
             linear_attn=False,
         )
         
-        return DiffusionAttentionStruct(
+        return InfinityAttentionStruct(
             module=module, parent=parent, fname=fname, idx=idx, rname=rname, rkey=rkey,
             config=config, q_proj=module.to_q, k_proj=module.to_k, v_proj=module.to_v, o_proj=o_proj,
             q_proj_rname="to_q", k_proj_rname="to_k", v_proj_rname="to_v",
@@ -255,6 +259,14 @@ class InfinityAttentionStruct(DiffusionAttentionStruct):
             add_o_proj=None, add_q_proj_rname="", add_k_proj_rname="", add_v_proj_rname="",
             add_o_proj_rname="", q=None, k=None, v=None, q_rname="", k_rname="", v_rname=""
         )
+
+    def filter_kwargs(self, kwargs: dict) -> dict:
+        """
+        Overrides the base class method. Returns the kwargs dictionary
+        without filtering to ensure custom arguments like 'ca_kv' are
+        passed through to the evaluation module.
+        """
+        return kwargs
 
 
 class InfinityFeedForwardStruct(DiffusionFeedForwardStruct):
@@ -273,7 +285,7 @@ class InfinityFeedForwardStruct(DiffusionFeedForwardStruct):
             config=config, up_projs=up_projs, down_projs=down_projs,
             up_proj_rnames=up_proj_rnames, down_proj_rnames=down_proj_rnames
         )
-    
+   
 class InfinityTransformerBlockStruct(DiffusionTransformerBlockStruct):
     def __post_init__(self):
         self.attn_struct_cls = InfinityAttentionStruct
@@ -362,7 +374,6 @@ class InfinityStruct(DiTStruct):
             transformer_blocks_rname="block_chunks", norm_out_rname="head_nm", proj_out_rname="head",
         )
 
-
 DiffusionAttentionStruct.register_factory((SelfAttention, CrossAttention), InfinityAttentionStruct._default_construct)
 DiffusionFeedForwardStruct.register_factory((FFN, FFNSwiGLU), InfinityFeedForwardStruct._default_construct)
 DiffusionTransformerBlockStruct.register_factory(CrossAttnBlock, InfinityTransformerBlockStruct._default_construct)
@@ -371,60 +382,6 @@ DiffusionAttentionStruct.register_factory((PatchedSelfAttention, PatchedCrossAtt
 # And as a fallback, register with the absolute base class as you suggested.
 BaseModuleStruct.register_factory(Infinity, InfinityStruct._default_construct)
 
-'''
-
-#BaseModuleStruct.register_factory(Infinity, InfinityStruct._default_construct)
-
-def register_factories():
-    """
-    Idempotent function to register the InfinityStruct and its components
-    with the deepcompressor framework. It checks for existence before
-    registering to prevent overwriting and allow safe re-execution.
-    """
-    # Define all registrations in a structured list for clarity and maintainability.
-    # Each tuple contains: (StructClass, (ModuleType(s)), FactoryFunction)
-    registrations = [
-        (
-            DiffusionAttentionStruct,
-            (SelfAttention, CrossAttention, PatchedSelfAttention, PatchedCrossAttention),
-            InfinityAttentionStruct._default_construct
-        ),
-        (
-            DiffusionFeedForwardStruct,
-            (FFN, FFNSwiGLU),
-            InfinityFeedForwardStruct._default_construct
-        ),
-        (
-            DiffusionTransformerBlockStruct,
-            CrossAttnBlock,
-            InfinityTransformerBlockStruct._default_construct
-        ),
-        (
-            DiTStruct,
-            Infinity,
-            InfinityStruct._default_construct
-        ),
-        (
-            BaseModuleStruct,
-            InfinityStruct,
-            lambda module, **kwargs: module
-        )
-    ]
-
-    # Loop through and register safely
-    for struct_cls, module_types, factory_fn in registrations:
-        # Ensure module_types is always iterable, even if it's a single class
-        if not isinstance(module_types, (list, tuple)):
-            module_types = (module_types,)
-        
-        for module_type in module_types:
-            # THE KEY CHANGE: Check if the specific module type is already a key
-            # in the struct's factory dictionary before registering.
-            if module_type not in struct_cls._factories:
-                struct_cls.register_factory(module_type, factory_fn)
-    
-    #BaseModuleStruct.register_factory(Infinity, InfinityStruct._default_construct)
-'''
 
 def patchModel(model: Infinity) -> nn.Module:
     """

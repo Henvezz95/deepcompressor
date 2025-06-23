@@ -12,7 +12,7 @@ from collections import defaultdict, OrderedDict
 from functools import partial
 
 from deepcompressor.data.cache import IOTensorsCache, TensorsCache, TensorCache
-from deepcompressor.app.diffusion.nn.struct_infinity import InfinityStruct
+from deepcompressor.app.diffusion.nn.struct_infinity import InfinityStruct, PatchedCrossAttention
 from deepcompressor.app.diffusion.nn.struct import DiffusionBlockStruct
 
 class InfinityCalibManager:
@@ -74,17 +74,13 @@ class InfinityCalibManager:
         """
         device = next(self.model_struct.module.parameters()).device
         aggregated_activations = defaultdict(list)
+        representative_block_kwargs = {}
         
         for prompt_filename, steps in tqdm(self.prompts.items(), desc=f"Processing Prompts for {block_struct.name}", leave=False):
-            
             prompt_history = {step: torch.load(path, map_location='cpu') for step, path in steps.items()}
-            
             for step_index in sorted(prompt_history.keys()):
-                
                 state_dict = prompt_history[step_index]
-
                 self._set_kv_cache_for_step(self.model_struct.module, step_index, prompt_filename)
-
                 with torch.no_grad():
                     hidden_states = state_dict['input_hidden_states'].to(device).float()
                     block_kwargs = {
@@ -93,15 +89,23 @@ class InfinityCalibManager:
                         'scale_schedule': state_dict['scale_schedule'], 'scale_ind': state_dict['scale_ind'],
                         'rope2d_freqs_grid': state_dict['rope2d_freqs_grid'], 'attn_bias_or_two_vector': None,
                     }
+                    if not representative_block_kwargs:
+                        representative_block_kwargs = block_kwargs
                     
                     hooks = []
                     def get_hook(key):
                         def hook_fn(module, input_tuple, output):
-                            if input_tuple and isinstance(input_tuple[0], torch.Tensor):
-                                aggregated_activations[key].append(input_tuple[0])
+                            # For CrossAttention, we only capture hidden_states (args[0]).
+                            if isinstance(module, PatchedCrossAttention):
+                                if input_tuple and isinstance(input_tuple[0], torch.Tensor):
+                                    aggregated_activations[key].append(input_tuple[0].detach().cpu())
+                            # For all other modules, capture all tensor inputs.
+                            else:
+                                for arg in input_tuple:
+                                    if isinstance(arg, torch.Tensor):
+                                        aggregated_activations[key].append(arg.detach().cpu())
                         return hook_fn
 
-                    # --- START of FIX ---
                     # 1. Hook the individual linear layers
                     for _, module_name, module, _, _ in block_struct.named_key_modules():
                         if isinstance(module, nn.Linear):
@@ -114,7 +118,6 @@ class InfinityCalibManager:
                             module_name = sub_mod_struct.name
                             module_to_hook = sub_mod_struct.module
                             hooks.append(module_to_hook.register_forward_hook(get_hook(module_name)))
-                    # --- END of FIX ---
 
                     hidden_states = block_struct.module(hidden_states, **block_kwargs)
 
@@ -143,7 +146,7 @@ class InfinityCalibManager:
                     tensors_cache = TensorsCache(tensors=OrderedDict([(0, tensor_cache)]))
                     final_layer_cache[sub_mod_struct.name] = IOTensorsCache(inputs=tensors_cache)
 
-        return final_layer_cache
+        return final_layer_cache, representative_block_kwargs
 
     def iter_layer_activations(self):
         """
@@ -153,9 +156,8 @@ class InfinityCalibManager:
         device = next(self.model_struct.module.parameters()).device
         for block_struct in self.model_struct.iter_transformer_block_structs():
             # Collects the cache with all tensors on the CPU
-            cpu_aggregated_cache = self._collect_activations_for_block(block_struct)
+            cpu_aggregated_cache, block_kwargs = self._collect_activations_for_block(block_struct)
             
-            # --- START of FIX ---
             # Create a new cache, moving all tensors to the correct GPU device
             gpu_aggregated_cache = {}
             for module_name, iot_cache in cpu_aggregated_cache.items():
@@ -171,9 +173,8 @@ class InfinityCalibManager:
                             orig_device=device # Update the original device metadata
                         )
                     gpu_aggregated_cache[module_name] = IOTensorsCache(inputs=TensorsCache(tensors=gpu_tensors_dict))
-            # --- END of FIX ---
 
-            yield block_struct, gpu_aggregated_cache, {}
+            yield block_struct, gpu_aggregated_cache, block_kwargs
             
             # Clean up memory before processing the next block
             del cpu_aggregated_cache, gpu_aggregated_cache
