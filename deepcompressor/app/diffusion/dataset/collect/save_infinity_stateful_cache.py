@@ -96,16 +96,12 @@ class StatefulInfinity(Infinity):
         # It's good practice to check that the attributes were set
         if k is None or v is None:
             raise RuntimeError(f"Hook for layer {layer_name} did not find last_k or last_v.")
-        # --- END OF FIX ---
 
         self.kv_delta_cache[layer_name] = {
             'k_delta': k.detach().cpu(),
             'v_delta': v.detach().cpu()
         }
 
-        # --- OPTIONAL BUT RECOMMENDED ---
-        # Clean up the temporary attributes after capture to prevent potential memory leaks
-        # and ensure a clean state for the next step.
         module.last_k = None
         module.last_v = None
 

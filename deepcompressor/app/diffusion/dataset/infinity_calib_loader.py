@@ -25,6 +25,14 @@ class InfinityCalibManager:
     def __init__(self, model: InfinityStruct, cache_dir: str, batch_size: int):
         self.model_struct = model
         self.cache_dir = cache_dir
+
+        # Set all self-attention modules to stateless mode once during initialization.
+        print("Setting self-attention modules to stateless mode (caching=False) for calibration.")
+        for mod in self.model_struct.module.modules():
+            # Check for the attribute that identifies the self-attention modules
+            # This could be 'kv_caching' or a more specific class type.
+            if hasattr(mod, 'caching'): 
+                mod.caching = False
         
         self.prompts = defaultdict(dict)
         filepaths = [os.path.join(self.cache_dir, f) for f in os.listdir(self.cache_dir) if f.endswith(".pt")]
@@ -38,35 +46,46 @@ class InfinityCalibManager:
             
         print(f"InfinityCalibManager initialized for {len(self.prompts)} prompts.")
 
-    def _set_kv_cache_for_step(self, model_instance, step_index, prompt_filename):
-        """Helper to reconstruct and set the KV cache for a single step."""
-        device = next(model_instance.parameters()).device
-        
-        def find_past_filepath(p_filename, p_step):
-            return os.path.join(self.cache_dir, f"{p_filename}_step_{p_step:02d}.pt")
 
-        for name, mod in model_instance.named_modules():
-            if hasattr(mod, 'kv_caching'):
-                if step_index == 0:
-                    mod.cached_k, mod.cached_v = None, None
-                else:
+    def _build_sa_kv_cache(self, step_index, prompt_step_history, block_struct):
+        """
+        Builds and returns a dictionary of cumulative SA KV caches for a given step.
+        This function is purely stateless and does not modify the model.
+        """
+        sa_kv_cache = {}
+        device = next(self.model_struct.module.parameters()).device
+
+        # 1. Iterate through the block's submodules to find the self-attention container.
+        #    The 'attn_structs' property is the correct place to look.
+        for attn_struct in block_struct.attn_structs:
+            # 2. Check if this is a self-attention module (not cross-attention).
+            #    We can identify it by the 'kv_caching' attribute we know it has.
+            if hasattr(attn_struct.module, 'caching'):
+                local_sa_name = attn_struct.name.split('.')[-1]  # This will be the local name, e.g., 'sa'
+                
+                # 3. Construct the fully-qualified name that was used as the key when saving.
+                #    This combines the block's global name with the submodule's local name.
+                expected_key_in_cache = f"{block_struct.name}.{local_sa_name}"
+
+                if step_index > 0:
                     history_k, history_v = [], []
                     for prev_step in range(step_index):
-                        past_filepath = find_past_filepath(prompt_filename, prev_step)
-                        if os.path.exists(past_filepath):
-                            try:
-                                past_state = torch.load(past_filepath, map_location='cpu')
-                                if name in past_state.get('kv_deltas', {}):
-                                    history_k.append(past_state['kv_deltas'][name]['k_delta'])
-                                    history_v.append(past_state['kv_deltas'][name]['v_delta'])
-                            except (FileNotFoundError, EOFError):
-                                continue
-                    
+                        past_state = prompt_step_history[prev_step]
+                        
+                        # 4. Use the correctly constructed key for the lookup in the cache file.
+                        if expected_key_in_cache in past_state.get('kv_deltas', {}):
+                            delta = past_state['kv_deltas'][expected_key_in_cache]
+                            history_k.append(delta['k_delta'])
+                            history_v.append(delta['v_delta'])
+
                     if history_k:
-                        mod.cached_k = torch.cat(history_k, dim=2).to(device)
-                        mod.cached_v = torch.cat(history_v, dim=2).to(device)
-                    else:
-                        mod.cached_k, mod.cached_v = None, None
+                        cumulative_k = torch.cat(history_k, dim=2).to(device)
+                        cumulative_v = torch.cat(history_v, dim=2).to(device)
+                        
+                        # 5. Store the cache in our dictionary using the LOCAL name ('sa'),
+                        #    which is what the PatchedSelfAttention module will look for in kwargs.
+                        sa_kv_cache[local_sa_name] = {'k': cumulative_k, 'v': cumulative_v}      
+        return sa_kv_cache
 
     def _collect_activations_for_block(self, block_struct: DiffusionBlockStruct):
         """
@@ -75,12 +94,14 @@ class InfinityCalibManager:
         device = next(self.model_struct.module.parameters()).device
         aggregated_activations = defaultdict(list)
         representative_block_kwargs = {}
-        
         for prompt_filename, steps in tqdm(self.prompts.items(), desc=f"Processing Prompts for {block_struct.name}", leave=False):
-            prompt_history = {step: torch.load(path, map_location='cpu') for step, path in steps.items()}
-            for step_index in sorted(prompt_history.keys()):
-                state_dict = prompt_history[step_index]
-                self._set_kv_cache_for_step(self.model_struct.module, step_index, prompt_filename)
+    
+            # Now 'steps' is defined, and this line will work correctly
+            prompt_step_history = {step: torch.load(path, map_location='cpu') for step, path in steps.items()}
+            
+            for step_index in sorted(prompt_step_history.keys()):
+                state_dict = prompt_step_history[step_index]
+                cumulative_sa_cache = self._build_sa_kv_cache(step_index, prompt_step_history, block_struct)
                 with torch.no_grad():
                     hidden_states = state_dict['input_hidden_states'].to(device).float()
                     block_kwargs = {
@@ -88,28 +109,45 @@ class InfinityCalibManager:
                         'ca_kv': tuple(t.to(device) if isinstance(t, torch.Tensor) else t for t in state_dict['ca_kv']),
                         'scale_schedule': state_dict['scale_schedule'], 'scale_ind': state_dict['scale_ind'],
                         'rope2d_freqs_grid': state_dict['rope2d_freqs_grid'], 'attn_bias_or_two_vector': None,
+                        'sa_kv_cache': cumulative_sa_cache
                     }
                     if not representative_block_kwargs:
                         representative_block_kwargs = block_kwargs
                     
                     hooks = []
-                    def get_hook(key):
-                        def hook_fn(module, input_tuple, output):
-                            # For CrossAttention, we only capture hidden_states (args[0]).
-                            if isinstance(module, PatchedCrossAttention):
-                                if input_tuple and isinstance(input_tuple[0], torch.Tensor):
-                                    aggregated_activations[key].append(input_tuple[0].detach().cpu())
-                            # For all other modules, capture all tensor inputs.
-                            else:
-                                for arg in input_tuple:
-                                    if isinstance(arg, torch.Tensor):
-                                        aggregated_activations[key].append(arg.detach().cpu())
-                        return hook_fn
+                    def get_hook(key, module): # Pass the actual module instance
+                        # The default hook for most layers
+                        def default_hook_fn(module, input_tuple, output):
+                            for arg in input_tuple:
+                                if isinstance(arg, torch.Tensor):
+                                    aggregated_activations[key].append(arg.detach().cpu())
+
+                        # A special hook for our attention block containers
+                        def container_hook_fn(module, input_tuple, output):
+                            # Capture positional inputs like hidden_states
+                            for arg in input_tuple:
+                                if isinstance(arg, torch.Tensor):
+                                    aggregated_activations[key].append(arg.detach().cpu())
+                            
+                            # Also capture our special 'sa_kv_cache' from the keyword arguments
+                            # kwargs are passed as the last element of the input tuple if they exist
+                            if input_tuple and isinstance(input_tuple[-1], dict):
+                                kwargs = input_tuple[-1]
+                                if 'sa_kv_cache' in kwargs and kwargs['sa_kv_cache']:
+                                    # Save this data under a special key so the consumer knows what it is.
+                                    # The key could be the block name itself, as it's the main "activation".
+                                    aggregated_activations[key].append(kwargs['sa_kv_cache'])
+
+                        # Return the correct hook based on the module type
+                        if isinstance(module, PatchedCrossAttention): # Or your new CalibCrossAttnBlock
+                            return container_hook_fn
+                        else:
+                            return default_hook_fn
 
                     # 1. Hook the individual linear layers
                     for _, module_name, module, _, _ in block_struct.named_key_modules():
                         if isinstance(module, nn.Linear):
-                            hooks.append(module.register_forward_hook(get_hook(module_name)))
+                            hooks.append(module.register_forward_hook(get_hook(module_name, module)))
                     
                     # 2. ALSO hook the container modules (Attention and FFN)
                     submodule_structs_to_process = block_struct.attn_structs + [block_struct.ffn_struct]
@@ -117,7 +155,7 @@ class InfinityCalibManager:
                         if sub_mod_struct:
                             module_name = sub_mod_struct.name
                             module_to_hook = sub_mod_struct.module
-                            hooks.append(module_to_hook.register_forward_hook(get_hook(module_name)))
+                            hooks.append(module_to_hook.register_forward_hook(get_hook(module_name, module_to_hook)))
 
                     hidden_states = block_struct.module(hidden_states, **block_kwargs)
 

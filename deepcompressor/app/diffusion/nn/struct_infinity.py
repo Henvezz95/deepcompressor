@@ -55,7 +55,7 @@ class PatchedSelfAttention(Attention):
     It overrides the __init__ and forward methods to replicate the exact behavior
     of the original Infinity SelfAttention layer with unfused projections.
     """
-    def __init__(self, original_sa_module: SelfAttention):
+    def __init__(self, original_sa_module: SelfAttention, module_name=None):
         dim_head = original_sa_module.proj.in_features // original_sa_module.num_heads
         super().__init__(
             query_dim=original_sa_module.proj.in_features,
@@ -64,6 +64,7 @@ class PatchedSelfAttention(Attention):
             bias=True
         )
         
+        self.module_name = module_name
         original_qkv_weight = original_sa_module.mat_qkv.weight
         q_w, k_w, v_w = torch.chunk(original_qkv_weight, 3, dim=0)
         self.to_q.weight.data.copy_(q_w)
@@ -107,6 +108,15 @@ class PatchedSelfAttention(Attention):
         """
         A robust forward method that handles potentially missing non-tensor arguments.
         """
+        sa_kv_cache = kwargs.get('sa_kv_cache', {})
+
+        #  Get the specific cache for THIS module using its key 'sa'
+        past_k, past_v = None, None
+        if sa_kv_cache:
+            cache_for_this_module = sa_kv_cache.get('sa', {})
+            past_k = cache_for_this_module.get('k')
+            past_v = cache_for_this_module.get('v')
+
         B, L_current, C = hidden_states.shape
         head_dim = self.inner_dim // self.heads
         
@@ -122,6 +132,8 @@ class PatchedSelfAttention(Attention):
         if rope2d_freqs_grid is not None and scale_schedule is not None:
             q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind)
 
+        # Cache can be stored internally or received through kwargs
+        # To keep compatibility with both Infinity and Deepcompressor
         if self.caching:
             if self.cached_k is None:
                 self.cached_k, self.cached_v = k, v
@@ -130,7 +142,11 @@ class PatchedSelfAttention(Attention):
                 self.cached_v = torch.cat((self.cached_v, v), dim=2)
             k_final, v_final = self.cached_k, self.cached_v
         else:
-            k_final, v_final = k, v
+            if past_k is not None:
+                k_final = torch.cat([past_k, k], dim=2)
+                v_final = torch.cat([past_v, v], dim=2)
+            else:
+                k_final, v_final = k, v
             
         out = F.scaled_dot_product_attention(q, k_final, v_final, attn_mask=attention_mask, scale=self.scale)
         
@@ -155,7 +171,6 @@ class PatchedCrossAttention(Attention):
             bias=True
         )
         
-        # --- FIX: Explicitly set self.dim_head ---
         self.dim_head = dim_head
 
         self.to_q.weight.data.copy_(original_ca_module.mat_q.weight)
@@ -222,7 +237,6 @@ class PatchedCrossAttention(Attention):
         # Return the output in the same dtype as the input for consistency
         return out.to(hidden_states.dtype)
     
-
 class InfinityAttentionStruct(DiffusionAttentionStruct):
     @staticmethod
     def _default_construct(
@@ -389,7 +403,7 @@ def patchModel(model: Infinity) -> nn.Module:
     ensuring they are on the same device as the original model.
     """
     for block in model.block_chunks.children():
-        for sub_block in block.module.children():
+        for sub_block_name, sub_block in block.module.named_children():
             if isinstance(sub_block, CrossAttnBlock):    
                 # 1. Get the correct device from the original module before replacing it.
                 device = sub_block.sa.proj.weight.device
