@@ -1,7 +1,7 @@
 import gc
 import json
 import os
-import pprint
+import pprint 
 import traceback
 import sys
 
@@ -24,11 +24,12 @@ from .nn.struct import DiffusionModelStruct
 from .quant import (
     load_diffusion_weights_state_dict,
     quantize_diffusion_activations,
-    quantize_diffusion_weights,
+    #quantize_diffusion_weights,
     rotate_diffusion,
     #smooth_diffusion,
 )
 from .quant.smooth_infinity import smooth_infinity_model as smooth_diffusion
+from .quant.weight_infinity import quantize_infinity_weights as quantize_diffusion_weights
 
 # Your model loading utilities
 from Infinity_rep.infinity.models.infinity import Infinity
