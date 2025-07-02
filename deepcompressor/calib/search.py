@@ -754,7 +754,10 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
             assert isinstance(orig_ipts, TensorsCache), "orig_ipts should not be None for OutputsError"
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
             for i in range(len(orig_ipts.front().data)):
-                ipt = orig_ipts.extract(i, eval_kwargs)
+                if isinstance(eval_kwargs, list):
+                    ipt = orig_ipts.extract(i, eval_kwargs[i])
+                else: 
+                    ipt = orig_ipts.extract(i, eval_kwargs)
                 y = eval_module(*ipt.args, **ipt.kwargs)
                 y = y[0] if not isinstance(y, torch.Tensor) else y
                 assert isinstance(y, torch.Tensor), "eval_mod should return a tensor"
@@ -818,7 +821,10 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                 self._process_wgts_centric_mod(wgts=wgts, mods=mods, **kwargs)
                 e = [None]
                 for i in range(len(ipts.front().data)):
-                    ipt = ipts.extract(i, eval_kwargs)
+                    if isinstance(eval_kwargs, list):
+                        ipt = ipts.extract(i, eval_kwargs[i])
+                    else:
+                        ipt = ipts.extract(i, eval_kwargs)
                     y = eval_module(*ipt.args, **ipt.kwargs)
                     y = y[0] if not isinstance(y, torch.Tensor) else y
                     assert isinstance(y, torch.Tensor), "eval_mod should return a tensor"
@@ -907,7 +913,10 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                     p.data = w.to(device=p.data.device)
             orig_opts: dict[tuple[int, ...], torch.Tensor] = {}
             for i in range(len(orig_ipts.front().data)):
-                ipt = orig_ipts.extract(i, eval_kwargs)
+                if isinstance(eval_kwargs, list):
+                    ipt = orig_ipts.extract(i, eval_kwargs[i])
+                else:
+                    ipt = orig_ipts.extract(i, eval_kwargs)
                 y = eval_module(*ipt.args, **ipt.kwargs)
                 y = y[0] if not isinstance(y, torch.Tensor) else y
                 assert isinstance(y, torch.Tensor), "eval_mod should return a tensor"
@@ -975,7 +984,10 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                 self._process_ipts_centric_mod(wgts=wgts, mods=mods, **kwargs)
                 e = [None]
                 for i in range(len(ipts.front().data)):
-                    ipt = ipts.extract(i, eval_kwargs)
+                    if isinstance(eval_kwargs, list):
+                        ipt = ipts.extract(i, eval_kwargs[i])
+                    else:
+                        ipt = ipts.extract(i, eval_kwargs)
                     y = eval_module(*ipt.args, **ipt.kwargs)
                     y = y[0] if not isinstance(y, torch.Tensor) else y
                     assert isinstance(y, torch.Tensor), "eval_mod should return a tensor"
@@ -1059,7 +1071,10 @@ class SearchBasedCalibrator(ABC, tp.Generic[_CONFIG, _CANDIDATE]):
                 )
                 e = [None]
                 for i in range(len(eval_inputs.front().data)):
-                    ipt = eval_inputs.extract(i, eval_kwargs)
+                    if isinstance(eval_kwargs, list):
+                        ipt = eval_inputs.extract(i, eval_kwargs[i])
+                    else:
+                        ipt = eval_inputs.extract(i, eval_kwargs)
                     y = eval_module(*ipt.args, **ipt.kwargs)
                     y = y[0] if not isinstance(y, torch.Tensor) else y
                     assert isinstance(y, torch.Tensor), "eval_mod should return a tensor"
