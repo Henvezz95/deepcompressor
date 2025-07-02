@@ -90,8 +90,8 @@ class StatefulInfinity(Infinity):
         # --- START OF FIX ---
         # The 'module' argument is the PatchedSelfAttention instance that triggered the hook.
         # We now access the k and v tensors from the temporary attributes we just added.
-        k = module.last_k
-        v = module.last_v
+        k = module.cached_k
+        v = module.cached_v
 
         # It's good practice to check that the attributes were set
         if k is None or v is None:
@@ -102,8 +102,8 @@ class StatefulInfinity(Infinity):
             'v_delta': v.detach().cpu()
         }
 
-        module.last_k = None
-        module.last_v = None
+        module.cached_k = None
+        module.cached_v = None
 
     @contextmanager
     def _register_delta_hooks(self):

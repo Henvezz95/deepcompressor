@@ -22,9 +22,13 @@ class InfinityCalibManager:
     It loads the full history for one prompt at a time to dramatically reduce
     redundant file I/O during KV cache reconstruction.
     """
-    def __init__(self, model: InfinityStruct, cache_dir: str, batch_size: int):
+    def __init__(self, model: InfinityStruct, cache_dir: str, batch_size: int, smooth_cache: dict[str, torch.Tensor] | None = None):
         self.model_struct = model
         self.cache_dir = cache_dir
+        if not smooth_cache or smooth_cache is None:
+            self.skip = False
+        else:
+            self.skip = True
 
         # Set all self-attention modules to stateless mode once during initialization.
         print("Setting self-attention modules to stateless mode (caching=False) for calibration.")
@@ -193,6 +197,9 @@ class InfinityCalibManager:
         """
         device = next(self.model_struct.module.parameters()).device
         for block_struct in self.model_struct.iter_transformer_block_structs():
+            if self.skip:
+                yield block_struct, {}, {}
+                continue
             # Collects the cache with all tensors on the CPU
             cpu_aggregated_cache, block_kwargs = self._collect_activations_for_block(block_struct)
             

@@ -43,6 +43,7 @@ from infinity.models.basic import (
     apply_rotary_emb
 )
 # We need to import the loader functions
+from deepcompressor.app.diffusion.dataset.collect.online_infinity_generation import StatefulInfinity
 from tools.run_infinity import load_visual_tokenizer, load_transformer, load_tokenizer, gen_one_img, h_div_w_templates, dynamic_resolution_h_w
 
 
@@ -392,9 +393,11 @@ DiffusionAttentionStruct.register_factory((SelfAttention, CrossAttention), Infin
 DiffusionFeedForwardStruct.register_factory((FFN, FFNSwiGLU), InfinityFeedForwardStruct._default_construct)
 DiffusionTransformerBlockStruct.register_factory(CrossAttnBlock, InfinityTransformerBlockStruct._default_construct)
 DiTStruct.register_factory(Infinity, InfinityStruct._default_construct)
+DiTStruct.register_factory(StatefulInfinity, InfinityStruct._default_construct)
 DiffusionAttentionStruct.register_factory((PatchedSelfAttention, PatchedCrossAttention), InfinityAttentionStruct._default_construct)
 # And as a fallback, register with the absolute base class as you suggested.
 BaseModuleStruct.register_factory(Infinity, InfinityStruct._default_construct)
+BaseModuleStruct.register_factory(StatefulInfinity, InfinityStruct._default_construct)
 
 
 def patchModel(model: Infinity) -> nn.Module:
@@ -446,12 +449,13 @@ def main():
     h_div_w_template_ = h_div_w_templates[np.argmin(np.abs(h_div_w_templates-h_div_w))]
     scale_schedule = dynamic_resolution_h_w[h_div_w_template_][args.pn]['scales']
     scale_schedule = [(1, h, w) for (_, h, w) in scale_schedule]
+    '''
     img = gen_one_img(
         model,
         vae,
         text_tokenizer,
         text_encoder,
-        'A photo of a cat',
+        'A photo of a happy dog',
         g_seed=16,
         gt_leak=0,
         gt_ls_Bl=None,
@@ -467,17 +471,22 @@ def main():
     
     print("Full Infinity model loaded successfully.\n")
     # --- Patch the model before creating the struct ---
+    '''
     print("--- Patching attention layers to be compatible ---")
-    patched_model = patchModel(model)
+    quantized_model = patchModel(model)
     print("Patching complete.\n")
+    smoothing_scales = torch.load('runs/diffusion/infinity_2b/infinity_2b/w.4-x.4-y.16/w.sint4-x.sint4.u-y.bf16/w.v64.bf16-x.v64.bf16-y.tnsr.bf16/smooth.proj-w.static.lowrank/shift-skip.x.[[w]+tan+tn].w.[e+tpo]-low.r32.i100.e.skip.[r+s+tan+tn+tpi]-smth.proj.GridSearch.bn2.[AbsMax].lr.skip.[r+s+tan+tn+tpi]-qdiff.64-t13.g3.0-s5000.RUNNING/run-250626.154746.RUNNING/model/smooth.pt')
+    weights = torch.load('runs/diffusion/infinity_2b/infinity_2b/w.4-x.4-y.16/w.sint4-x.sint4.u-y.bf16/w.v64.bf16-x.v64.bf16-y.tnsr.bf16/smooth.proj-w.static.lowrank/shift-skip.x.[[w]+tan+tn].w.[e+tpo]-low.r32.i100.e.skip.[r+s+tan+tn+tpi]-smth.proj.GridSearch.bn2.[AbsMax].lr.skip.[r+s+tan+tn+tpi]-qdiff.64-t13.g3.0-s5000.RUNNING/run-250626.154746.RUNNING/model/model.pt', 
+                         weights_only=True)
+    quantized_model.load_state_dict(weights)
 
 
     img = gen_one_img(
-        patched_model,
+        quantized_model,
         vae,
         text_tokenizer,
         text_encoder,
-        'A photo of a cat',
+        'A photo of a happy dog',
         g_seed=16,
         gt_leak=0,
         gt_ls_Bl=None,
@@ -496,7 +505,7 @@ def main():
     print("--- Testing full Infinity model parsing ---")
     
     # The generic construct call should now work because we've patched it.
-    model_struct = DiTStruct.construct(patched_model)
+    model_struct = DiTStruct.construct(quantized_model)
 
     print(f"Created model_struct for: {type(model_struct.module).__name__}")
     print(f"  - The struct is of type: {type(model_struct).__name__}")
