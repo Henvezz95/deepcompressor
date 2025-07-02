@@ -1,268 +1,369 @@
-# /workspace/deepcompressor/app/var/ptq_infinity.py
-#
-# Description:
-# This script orchestrates the Post-Training Quantization (PTQ) of the Infinity
-# model using the SVDQuant algorithm from the deepcompressor library.
-# It uses the pre-collected calibration data to apply smoothing and SVD-based
-# weight quantization to the model's transformer blocks.
-#
-import torch
-import torch.nn as nn
-import os
-import argparse
-import functools
-import typing as tp
-from tqdm import tqdm
-import sys
 import gc
-import traceback
-import pprint
 import json
-import re
-from collections import defaultdict
-from dataclasses import dataclass, field
+import os
+import pprint 
+import traceback
+import sys
+import datasets
 
-# --- Add paths to your projects ---
 sys.path.append('.') 
 sys.path.append('/workspace/deepcompressor/Infinity_rep/') 
 
-# --- DeepCompressor and Infinity Imports ---
-from deepcompressor.app.diffusion.nn.struct_infinity import InfinityModelStruct
-
-from deepcompressor.app.diffusion.quant import (
-    smooth_diffusion,
-    quantize_diffusion_weights,
-    quantize_diffusion_activations,
-)
-from deepcompressor.app.diffusion.config import (
-    DiffusionPipelineConfig,
-    DiffusionPtqRunConfig, 
-    DiffusionQuantCacheConfig, 
-    DiffusionQuantConfig
-)
-from deepcompressor.utils import tools
-from omniconfig import configclass, ConfigParser
-from deepcompressor.data.utils.dtype import eval_dtype
+import torch
+from diffusers import DiffusionPipeline
 
 from deepcompressor.app.llm.nn.patch import patch_attention, patch_gemma_rms_norm
 from deepcompressor.app.llm.ptq import ptq as llm_ptq
 
-# Your model loading utilities
-from Infinity_rep.infinity.models.infinity import Infinity
-from Infinity_rep.tools.run_infinity import load_visual_tokenizer, load_transformer
+from deepcompressor.utils import tools
+import argparse
+from deepcompressor.app.diffusion.nn.struct_infinity import InfinityStruct, patchModel
+from deepcompressor.app.diffusion.nn.struct import DiTStruct
 
 from .config import DiffusionPtqCacheConfig, DiffusionPtqRunConfig, DiffusionQuantCacheConfig, DiffusionQuantConfig
-
+from .nn.struct import DiffusionModelStruct
 from .quant import (
     load_diffusion_weights_state_dict,
     quantize_diffusion_activations,
-    quantize_diffusion_weights,
+    #quantize_diffusion_weights,
     rotate_diffusion,
-    smooth_diffusion,
+    #smooth_diffusion,
 )
+from .quant.smooth_infinity_new import smooth_infinity_model as smooth_diffusion
+from .quant.weight_infinity import quantize_infinity_weights as quantize_diffusion_weights
 
-class InfinityPipeline:
-    """A simple container class to mimic the structure of a diffusers pipeline."""
-    def __init__(self, transformer, vae, text_encoder=None, text_tokenizer=None):
-        self.transformer = transformer
-        self.vae = vae
-        self.text_encoder = text_encoder
-        self.text_tokenizer = text_tokenizer
-        self.device = transformer.device
-        self.dtype = transformer.dtype
-        self.unet = None # for compatibility
+# Your model loading utilities
+from .dataset.collect.online_infinity_generation import StatefulInfinity, load_transformer, load_visual_tokenizer, args
+from .dataset.collect.calib import CollectConfig
 
-def _infinity_build_factory(
-    name: str, path: str, dtype: str | torch.dtype, device: str | torch.device, shift_activations: bool, **kwargs
-) -> InfinityPipeline:
-    """A factory function to load and construct the full Infinity model pipeline."""
+
+__all__ = ["ptq_infinity_new"]
+
+def ptq(  # noqa: C901
+    model: InfinityStruct,
+    configuration: DiffusionPtqRunConfig,
+    other_configs: dict,
+    cache: DiffusionPtqCacheConfig | None = None,
+    load_dirpath: str = "",
+    save_dirpath: str = "",
+    copy_on_save: bool = False,
+    save_model: bool = False,
+) -> DiffusionModelStruct:
+    """Post-training quantization of a diffusion model.
+
+    Args:
+        model (`DiffusionModelStruct`):
+            The diffusion model.
+        config (`DiffusionQuantConfig`):
+            The diffusion model post-training quantization configuration.
+        cache (`DiffusionPtqCacheConfig`, *optional*, defaults to `None`):
+            The diffusion model quantization cache path configuration.
+        load_dirpath (`str`, *optional*, defaults to `""`):
+            The directory path to load the quantization checkpoint.
+        save_dirpath (`str`, *optional*, defaults to `""`):
+            The directory path to save the quantization checkpoint.
+        copy_on_save (`bool`, *optional*, defaults to `False`):
+            Whether to copy the cache to the save directory.
+        save_model (`bool`, *optional*, defaults to `False`):
+            Whether to save the quantized model checkpoint.
+
+    Returns:
+        `DiffusionModelStruct`:
+            The quantized diffusion model.
+    """
+    config = configuration.quant
     logger = tools.logging.getLogger(__name__)
-    logger.info(f"Building custom Infinity pipeline for model: {name}")
-    
-    full_args = kwargs['build_kwargs'].get('config_namespace')
-    if full_args is None:
-        raise ValueError("config_namespace not found in kwargs for _infinity_build_factory")
-    
-    vae = load_visual_tokenizer(full_args)
-    transformer = load_transformer(vae, full_args).to(device).eval()
-    
-    return InfinityPipeline(transformer, vae)
+    if not isinstance(model, DiffusionModelStruct):
+        model = DiffusionModelStruct.construct(model)
+    assert isinstance(model, DiffusionModelStruct)
+    collect_config, pipeline_config = CollectConfig(other_configs["collect"]), other_configs["pipeline"]
 
-class InfinityPipelineConfig(DiffusionPipelineConfig):
-    """Inherits from DiffusionPipelineConfig and overrides the build method."""
-    # Define all fields from the YAML here so omniconfig can parse them.
-    model_type: str = "infinity_2b"
-    vae_path: str = ""
-    pn: str = "1M"
-    model_path: str = ""
-    text_encoder_ckpt: str = ""
-    vae_type: int = 32
-    text_channels: int = 2048
-    add_lvl_embeding_only_first_block: int = 1
-    use_bit_label: int = 1
-    rope2d_each_sa_layer: int = 1
-    rope2d_normalized_by_hw: int = 2
-    apply_spatial_patchify: int = 0
-    cfg_insertion_layer: int = 0
-    use_scale_schedule_embedding: int = 0
-    sampling_per_bits: int = 1
-    h_div_w_template: float = 1.0
-    use_flex_attn: int = 0
-    cache_dir: str = '/dev/shm'
-    checkpoint_type: str = 'torch'
-    seed: int = 0
-    bf16: int = 1
-    save_file: str = 'tmp.jpg'
-    enable_model_cache: int = 0
-    family: str = "infinity"
+    quant_wgts = config.enabled_wgts
+    quant_ipts = config.enabled_ipts
+    quant_opts = config.enabled_opts
+    quant_acts = quant_ipts or quant_opts
+    quant = quant_wgts or quant_acts
 
-    def build(self, dtype: torch.dtype | None = None, device: str | torch.device | None = None) -> InfinityPipeline:
-        """
-        Builds the Infinity pipeline. This override ensures that all custom
-        arguments from this config object are correctly passed to the factory.
-        """
-        if dtype is None: dtype = self.dtype
-        if device is None: device = self.device
-        
-        _factory = self._pipeline_factories.get(self.name)
-        if not _factory:
-            raise ValueError(f"No pipeline factory registered for the name '{self.name}'")
-        
-        # This correctly passes all attributes from the YAML file (via vars(self))
-        # to the factory as keyword arguments.
-        return _factory(**vars(self))
+    load_model_path, load_path, save_path = "", None, None
+    if load_dirpath:
+        load_path = DiffusionQuantCacheConfig(
+            smooth=os.path.join(load_dirpath, "smooth.pt"),
+            branch=os.path.join(load_dirpath, "branch.pt"),
+            wgts=os.path.join(load_dirpath, "wgts.pt"),
+            acts=os.path.join(load_dirpath, "acts.pt"),
+        )
+        load_model_path = os.path.join(load_dirpath, "model.pt")
+        if os.path.exists(load_model_path):
+            if config.enabled_wgts and config.wgts.enabled_low_rank:
+                if os.path.exists(load_path.branch):
+                    load_model = True
+                else:
+                    logger.warning(f"Model low-rank branch checkpoint {load_path.branch} does not exist")
+                    load_model = False
+            else:
+                load_model = True
+            if load_model:
+                logger.info(f"* Loading model from {load_model_path}")
+                save_dirpath = ""  # do not save the model if loading
+        else:
+            logger.warning(f"Model checkpoint {load_model_path} does not exist")
+            load_model = False
+    else:
+        load_model = False
+    if save_dirpath:
+        os.makedirs(save_dirpath, exist_ok=True)
+        save_path = DiffusionQuantCacheConfig(
+            smooth=os.path.join(save_dirpath, "smooth.pt"),
+            branch=os.path.join(save_dirpath, "branch.pt"),
+            wgts=os.path.join(save_dirpath, "wgts.pt"),
+            acts=os.path.join(save_dirpath, "acts.pt"),
+        )
+    else:
+        save_model = False
 
-# Register our factory for the name that will be in the YAML file.
-DiffusionPipelineConfig.register_pipeline_factory("infinity_2b", _infinity_build_factory)
+    if quant and config.enabled_rotation:
+        logger.info("* Rotating model for quantization")
+        tools.logging.Formatter.indent_inc()
+        rotate_diffusion(model, config=config)
+        tools.logging.Formatter.indent_dec()
+        gc.collect()
+        torch.cuda.empty_cache()
 
-@configclass
-@dataclass
-class InfinityPtqRunConfig(DiffusionPtqRunConfig):
-    """Top-level configuration class for our script."""
-    pipeline: InfinityPipelineConfig
-
-# --- Custom Calibration Iterator and PTQ function (implementations unchanged) ---
-def infinity_calibration_iterator(
-    model_struct: InfinityModelStruct, 
-    calib_cache_path: str,
-    batch_size: int,
-    device: str = "cuda"
-) -> tp.Generator[tuple[str, str, dict[str, torch.Tensor]], None, None]:
-    # This function implementation remains the same.
-    logger = tools.logging.getLogger(__name__)
-    if not os.path.isdir(calib_cache_path):
-        raise FileNotFoundError(f"Calibration cache directory not found: {calib_cache_path}")
-    cache_files = [os.path.join(calib_cache_path, f) for f in os.listdir(calib_cache_path) if f.endswith('.pt')]
-    if not cache_files:
-        raise FileNotFoundError(f"No .pt files found in {calib_cache_path}. Please run Step 2 first.")
-    
-    logger.info(f"Found {len(cache_files)} calibration files to iterate through.")
-    
-    for f_path in tqdm(cache_files, desc="Calibration Iterator", leave=False):
-        try:
-            cache_item = torch.load(f_path, map_location=device)
-            yield "model_forward", "inputs", {
-                "x_BLC_wo_prefix": cache_item.get("input_args")[0],
-                **cache_item.get("input_kwargs", {})
+    # region smooth quantization
+    if quant and config.enabled_smooth:
+        logger.info("* Smoothing model for quantization")
+        tools.logging.Formatter.indent_inc()
+        load_from = ""
+        if load_path and os.path.exists(load_path.smooth):
+            load_from = load_path.smooth
+        elif cache and cache.path.smooth and os.path.exists(cache.path.smooth):
+            load_from = cache.path.smooth
+        if load_from:
+            logger.info(f"- Loading smooth scales from {load_from}")
+            smooth_cache = torch.load(load_from)
+            smooth_diffusion(model, configuration, other_configs, smooth_cache=smooth_cache)
+        else:
+            logger.info("- Generating smooth scales")
+            smooth_cache = smooth_diffusion(model, config)
+            if cache and cache.path.smooth:
+                logger.info(f"- Saving smooth scales to {cache.path.smooth}")
+                os.makedirs(cache.dirpath.smooth, exist_ok=True)
+                torch.save(smooth_cache, cache.path.smooth)
+                load_from = cache.path.smooth
+        if save_path:
+            if not copy_on_save and load_from:
+                logger.info(f"- Linking smooth scales to {save_path.smooth}")
+                os.symlink(os.path.relpath(load_from, save_dirpath), save_path.smooth)
+            else:
+                logger.info(f"- Saving smooth scales to {save_path.smooth}")
+                torch.save(smooth_cache, save_path.smooth)
+        del smooth_cache
+        tools.logging.Formatter.indent_dec()
+        gc.collect()
+        torch.cuda.empty_cache()
+    # endregion
+    # region collect original state dict
+    if config.needs_acts_quantizer_cache:
+        if load_path and os.path.exists(load_path.acts):
+            orig_state_dict = None
+        elif cache and cache.path.acts and os.path.exists(cache.path.acts):
+            orig_state_dict = None
+        else:
+            orig_state_dict: dict[str, torch.Tensor] = {
+                name: param.detach().clone() for name, param in model.module.named_parameters() if param.ndim > 1
             }
-        except Exception as e:
-            logger.warning(f"Could not load or process cache file {f_path}: {e}")
-            continue
-
-def ptq(
-    model: InfinityModelStruct, config: DiffusionQuantConfig, cache: DiffusionQuantCacheConfig | None = None,
-    load_dirpath: str = "", save_dirpath: str = "", copy_on_save: bool = False, save_model: bool = False,
-) -> InfinityModelStruct:
-    logger = tools.logging.getLogger(__name__)
-    if not isinstance(model, InfinityModelStruct):
-        model = InfinityModelStruct.construct(model)
-    
-    # Run smoothing
-    if config.enabled_smooth:
-        logger.info("* Smoothing Infinity model for quantization...")
-        calibration_iterator = infinity_calibration_iterator(model, config.calib.path, config.calib.batch_size, model.module.device)
-        smooth_diffusion(model, config, calibration_iterator=calibration_iterator)
-        gc.collect(); torch.cuda.empty_cache()
-
-    # Run weight quantization
-    if config.enabled_wgts:
-        logger.info("* Quantizing Infinity weights...")
-        calibration_iterator = infinity_calibration_iterator(model, config.calib.path, config.calib.batch_size, model.module.device)
-        quantize_diffusion_weights(model, config, calibration_iterator=calibration_iterator)
-        gc.collect(); torch.cuda.empty_cache()
-
-    # Run activation quantization
-    if config.enabled_ipts or config.enabled_opts:
-        logger.info("* Quantizing Infinity activations...")
-        calibration_iterator = infinity_calibration_iterator(model, config.calib.path, config.calib.batch_size, model.module.device)
-        quantize_diffusion_activations(model, config, calibration_iterator=calibration_iterator)
-        gc.collect(); torch.cuda.empty_cache()
-        
+    else:
+        orig_state_dict = None
+    # endregion
+    if load_model:
+        logger.info(f"* Loading model checkpoint from {load_model_path}")
+        load_diffusion_weights_state_dict(
+            model,
+            config,
+            state_dict=torch.load(load_model_path),
+            branch_state_dict=torch.load(load_path.branch) if os.path.exists(load_path.branch) else None,
+        )
+        gc.collect()
+        torch.cuda.empty_cache()
+    elif quant_wgts:
+        logger.info("* Quantizing weights")
+        tools.logging.Formatter.indent_inc()
+        quantizer_state_dict, quantizer_load_from = None, ""
+        if load_path and os.path.exists(load_path.wgts):
+            quantizer_load_from = load_path.wgts
+        elif cache and cache.path.wgts and os.path.exists(cache.path.wgts):
+            quantizer_load_from = cache.path.wgts
+        if quantizer_load_from:
+            logger.info(f"- Loading weight settings from {quantizer_load_from}")
+            quantizer_state_dict = torch.load(quantizer_load_from)
+        branch_state_dict, branch_load_from = None, ""
+        if load_path and os.path.exists(load_path.branch):
+            branch_load_from = load_path.branch
+        elif cache and cache.path.branch and os.path.exists(cache.path.branch):
+            branch_load_from = cache.path.branch
+        if branch_load_from:
+            logger.info(f"- Loading branch settings from {branch_load_from}")
+            branch_state_dict = torch.load(branch_load_from)
+        if not quantizer_load_from:
+            logger.info("- Generating weight settings")
+        if not branch_load_from:
+            logger.info("- Generating branch settings")
+        quantizer_state_dict, branch_state_dict, scale_state_dict = quantize_diffusion_weights(
+            model,
+            config,
+            quantizer_state_dict=quantizer_state_dict,
+            branch_state_dict=branch_state_dict,
+            return_with_scale_state_dict=bool(save_dirpath),
+        )
+        if not quantizer_load_from and cache and cache.dirpath.wgts:
+            logger.info(f"- Saving weight settings to {cache.path.wgts}")
+            os.makedirs(cache.dirpath.wgts, exist_ok=True)
+            torch.save(quantizer_state_dict, cache.path.wgts)
+            quantizer_load_from = cache.path.wgts
+        if not branch_load_from and cache and cache.dirpath.branch:
+            logger.info(f"- Saving branch settings to {cache.path.branch}")
+            os.makedirs(cache.dirpath.branch, exist_ok=True)
+            torch.save(branch_state_dict, cache.path.branch)
+            branch_load_from = cache.path.branch
+        if save_path:
+            if not copy_on_save and quantizer_load_from:
+                logger.info(f"- Linking weight settings to {save_path.wgts}")
+                os.symlink(os.path.relpath(quantizer_load_from, save_dirpath), save_path.wgts)
+            else:
+                logger.info(f"- Saving weight settings to {save_path.wgts}")
+                torch.save(quantizer_state_dict, save_path.wgts)
+            if not copy_on_save and branch_load_from:
+                logger.info(f"- Linking branch settings to {save_path.branch}")
+                os.symlink(os.path.relpath(branch_load_from, save_dirpath), save_path.branch)
+            else:
+                logger.info(f"- Saving branch settings to {save_path.branch}")
+                torch.save(branch_state_dict, save_path.branch)
+        if save_model:
+            logger.info(f"- Saving model to {save_dirpath}")
+            torch.save(scale_state_dict, os.path.join(save_dirpath, "scale.pt"))
+            torch.save(model.module.state_dict(), os.path.join(save_dirpath, "model.pt"))
+        del quantizer_state_dict, branch_state_dict, scale_state_dict
+        tools.logging.Formatter.indent_dec()
+        gc.collect()
+        torch.cuda.empty_cache()
+    if quant_acts:
+        logger.info("  * Quantizing activations")
+        tools.logging.Formatter.indent_inc()
+        if config.needs_acts_quantizer_cache:
+            load_from = ""
+            if load_path and os.path.exists(load_path.acts):
+                load_from = load_path.acts
+            elif cache and cache.path.acts and os.path.exists(cache.path.acts):
+                load_from = cache.path.acts
+            if load_from:
+                logger.info(f"- Loading activation settings from {load_from}")
+                quantizer_state_dict = torch.load(load_from)
+                quantize_diffusion_activations(
+                    model, config, quantizer_state_dict=quantizer_state_dict, orig_state_dict=orig_state_dict
+                )
+            else:
+                logger.info("- Generating activation settings")
+                quantizer_state_dict = quantize_diffusion_activations(model, config, orig_state_dict=orig_state_dict)
+                if cache and cache.dirpath.acts and quantizer_state_dict is not None:
+                    logger.info(f"- Saving activation settings to {cache.path.acts}")
+                    os.makedirs(cache.dirpath.acts, exist_ok=True)
+                    torch.save(quantizer_state_dict, cache.path.acts)
+                load_from = cache.path.acts
+            if save_dirpath:
+                if not copy_on_save and load_from:
+                    logger.info(f"- Linking activation quantizer settings to {save_path.acts}")
+                    os.symlink(os.path.relpath(load_from, save_dirpath), save_path.acts)
+                else:
+                    logger.info(f"- Saving activation quantizer settings to {save_path.acts}")
+                    torch.save(quantizer_state_dict, save_path.acts)
+            del quantizer_state_dict
+        else:
+            logger.info("- No need to generate/load activation quantizer settings")
+            quantize_diffusion_activations(model, config, orig_state_dict=orig_state_dict)
+        tools.logging.Formatter.indent_dec()
+        del orig_state_dict
+        gc.collect()
+        torch.cuda.empty_cache()
     return model
 
-def main(config: InfinityPtqRunConfig, logging_level: int = tools.logging.DEBUG):
-    """Main orchestration script for Infinity PTQ."""
+
+def main(config: DiffusionPtqRunConfig, unused_cfgs: dict, logging_level: int = tools.logging.DEBUG) -> DiffusionPipeline:
+    """Post-training quantization of a diffusion model.
+            The diffusion model post-training quantization configuration.
+        logging_level (`int`, *optional*, defaults to `logging.DEBUG`):
+            The logging level.
+
+    Returns:
+        `DiffusionPipeline`:
+            The diffusion pipeline with quantized model.
+    """
     config.output.lock()
     config.dump(path=config.output.get_running_job_path("config.yaml"))
     tools.logging.setup(path=config.output.get_running_job_path("run.log"), level=logging_level)
     logger = tools.logging.getLogger(__name__)
 
     logger.info("=== Configurations ===")
-    logger.info(pprint.pformat(config.dump(), indent=2, width=120))
+    tools.logging.info(config.formatted_str(), logger=logger)
+    logger.info("=== Dumped Configurations ===")
+    tools.logging.info(pprint.pformat(config.dump(), indent=2, width=120), logger=logger)
     logger.info("=== Output Directory ===")
     logger.info(config.output.job_dirpath)
 
-    logger.info("=== Start Quantization ===")
-    logger.info("* Building Infinity model pipeline...")
-    
-    ### FIX: Pass the config namespace via the standard `build_kwargs` attribute ###
-    # This is the correct way to pass extra arguments to a custom factory.
-    config.pipeline.build_kwargs = {"config_namespace": argparse.Namespace(**vars(config.pipeline))}
-    pipeline = config.pipeline.build()
-    logger.info("✅ Pipeline built.")
+    logger.info("=== Start Evaluating ===")
+    logger.info("* Building diffusion model pipeline")
+    tools.logging.Formatter.indent_inc()
+    if "nf4" not in config.pipeline.name and "gguf" not in config.pipeline.name:
+        vae = load_visual_tokenizer(args)
+        infinity_model = load_transformer(vae, args)
+        print("✅ Successfully loaded Infinity model.")
+        print("--- Patching attention layers to be compatible ---")
 
-    model = InfinityModelStruct.construct(pipeline)
-    logger.info("✅ Model struct created.")
-    
-    save_dirpath = ""
-    if config.save_model:
-        if config.save_model.lower() in ("true", "default"):
-            save_dirpath = os.path.join(config.output.running_job_dirpath, "model")
+
+
+        # Instantiate the top-level struct, passing proj_in/out as expected by BaseTransformerStruct
+        patched_model = patchModel(infinity_model)
+        model = DiTStruct.construct(patched_model)
+
+        save_dirpath = os.path.join(config.output.running_job_dirpath, "cache")
+        if config.save_model:
+            if config.save_model.lower() in ("false", "none", "null", "nil"):
+                save_model = False
+            elif config.save_model.lower() in ("true", "default"):
+                save_dirpath, save_model = os.path.join(config.output.running_job_dirpath, "model"), True
+            else:
+                save_dirpath, save_model = config.save_model, True
         else:
-            save_dirpath = config.save_model
-    
-    model = ptq(
-        model,
-        config.quant,
-        cache=config.cache,
-        load_dirpath=config.load_from,
-        save_dirpath=save_dirpath,
-        copy_on_save=config.copy_on_save,
-        save_model=bool(save_dirpath),
-    )
-    
-    logger.info("✅ Quantization process finished.")
-    config.output.unlock()
+            save_model = False
+
+        model = ptq(
+            model,
+            config,
+            other_configs=unused_cfgs,
+            cache=config.cache,
+            load_dirpath=config.load_from,
+            save_dirpath=save_dirpath,
+            copy_on_save=config.copy_on_save,
+            save_model=save_model
+        )
+    print('Done')
+    print('Quantized model saved to:', save_dirpath)
 
 
 if __name__ == "__main__":
-    DiffusionQuantConfig.set_key_map(InfinityModelStruct._get_default_key_map())
-    parser = InfinityPtqRunConfig.get_parser()
-    config, _, unused_cfgs, unused_args, unknown_args = parser.parse_known_args()
-    assert isinstance(config, InfinityPtqRunConfig)
-    
-    if len(unused_cfgs) > 0: tools.logging.warning(f"Unused configurations: {unused_cfgs}")
-    if unused_args is not None: tools.logging.warning(f"Unused arguments: {unused_args}")
+    config, _, unused_cfgs, unused_args, unknown_args = DiffusionPtqRunConfig.get_parser().parse_known_args()
+
+    if len(unused_cfgs) > 0:
+        tools.logging.warning(f"Unused configurations: {unused_cfgs}")
+    if unused_args is not None:
+        tools.logging.warning(f"Unused arguments: {unused_args}")
     assert len(unknown_args) == 0, f"Unknown arguments: {unknown_args}"
-    
     try:
-        main(config, logging_level=tools.logging.DEBUG)
+        main(config, unused_cfgs, logging_level=tools.logging.DEBUG)
     except Exception as e:
         tools.logging.Formatter.indent_reset()
         tools.logging.error("=== Error ===")
         tools.logging.error(traceback.format_exc())
         tools.logging.shutdown()
         traceback.print_exc()
-        if hasattr(config, 'output'):
-             config.output.unlock(error=True)
+        config.output.unlock(error=True)
         raise e
