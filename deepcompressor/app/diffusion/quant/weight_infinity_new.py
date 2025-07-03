@@ -2,20 +2,23 @@ import torch
 import typing as tp
 from tqdm import tqdm
 
-from deepcompressor.app.diffusion.config import DiffusionQuantConfig
+from deepcompressor.app.diffusion.config import DiffusionQuantConfig, DiffusionPtqRunConfig
 from deepcompressor.app.diffusion.nn.struct import DiffusionModelStruct
 from deepcompressor.utils import tools
 
 # --- Import your custom data loader ---
-from ..dataset.infinity_calib_loader import InfinityCalibManager
+from ..dataset.infinity_calib_loader_new import InfinityCalibManager
+from deepcompressor.app.diffusion.nn.struct_infinity import InfinityStruct
 
 # --- Import the core low-rank and weight quantization logic from the framework ---
 from .weight import calibrate_diffusion_block_low_rank_branch, quantize_diffusion_block_weights, update_diffusion_block_weight_quantizer_state_dict
 
 @torch.inference_mode()
 def quantize_infinity_weights(
-    model: DiffusionModelStruct,
+    model: InfinityStruct,
     config: DiffusionQuantConfig,
+    config_loader: DiffusionPtqRunConfig,
+    other_configs: dict,
     quantizer_state_dict: dict | None = None,
     branch_state_dict: dict | None = None,
     return_with_scale_state_dict: bool = False,
@@ -38,9 +41,9 @@ def quantize_infinity_weights(
         logger.info("* Adding low-rank branches to weights")
         
         calib_manager = InfinityCalibManager(
-            model=model,
-            cache_dir=config.calib.path+'/caches/',
-            batch_size=config.calib.batch_size,
+            model = model, 
+            config = config_loader, 
+            other_configs = other_configs, 
             smooth_cache = {}
         )
         data_iterator = calib_manager.iter_layer_activations()
@@ -49,17 +52,8 @@ def quantize_infinity_weights(
         tools.logging.Formatter.indent_inc()
         with tools.logging.redirect_tqdm():
             if branch_state_dict:
-                for _, layer in tqdm(
-                    model.get_named_layers(skip_pre_modules=True, skip_post_modules=True).items(),
-                    desc="adding low-rank branches",
-                    leave=False,
-                    dynamic_ncols=True,
-                ):
-                    calibrate_diffusion_block_low_rank_branch(
-                        layer=layer, config=config, branch_state_dict=branch_state_dict
-                    )
-                    _ = data_iterator.next()
-
+                #### NO CODE IMPLEMENTATION FOR NOW ####
+                pass
             else:
                 # Use the custom data loader to calibrate the branches
                 with tqdm(total=num_blocks, desc="Calibrating low-rank branches") as pbar:

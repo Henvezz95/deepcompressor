@@ -10,6 +10,7 @@ sys.path.append('.')
 sys.path.append('/workspace/deepcompressor/Infinity_rep/') 
 
 import torch
+import torch._dynamo
 from diffusers import DiffusionPipeline
 
 from deepcompressor.app.llm.nn.patch import patch_attention, patch_gemma_rms_norm
@@ -30,7 +31,7 @@ from .quant import (
     #smooth_diffusion,
 )
 from .quant.smooth_infinity_new import smooth_infinity_model as smooth_diffusion
-from .quant.weight_infinity import quantize_infinity_weights as quantize_diffusion_weights
+from .quant.weight_infinity_new import quantize_infinity_weights as quantize_diffusion_weights
 
 # Your model loading utilities
 from .dataset.collect.online_infinity_generation import StatefulInfinity, load_transformer, load_visual_tokenizer, args
@@ -211,6 +212,8 @@ def ptq(  # noqa: C901
         quantizer_state_dict, branch_state_dict, scale_state_dict = quantize_diffusion_weights(
             model,
             config,
+            configuration,
+            other_configs,
             quantizer_state_dict=quantizer_state_dict,
             branch_state_dict=branch_state_dict,
             return_with_scale_state_dict=bool(save_dirpath),
@@ -334,7 +337,7 @@ def main(config: DiffusionPtqRunConfig, unused_cfgs: dict, logging_level: int = 
                 save_dirpath, save_model = config.save_model, True
         else:
             save_model = False
-
+        
         model = ptq(
             model,
             config,

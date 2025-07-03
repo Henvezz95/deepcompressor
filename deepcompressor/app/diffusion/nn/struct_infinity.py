@@ -475,8 +475,8 @@ def main():
     print("--- Patching attention layers to be compatible ---")
     quantized_model = patchModel(model)
     print("Patching complete.\n")
-    smoothing_scales = torch.load('runs/diffusion/infinity_2b/infinity_2b/w.4-x.4-y.16/w.sint4-x.sint4.u-y.bf16/w.v64.bf16-x.v64.bf16-y.tnsr.bf16/smooth.proj-w.static.lowrank/shift-skip.x.[[w]+tan+tn].w.[e+tpo]-low.r32.i100.e.skip.[r+s+tan+tn+tpi]-smth.proj.GridSearch.bn2.[AbsMax].lr.skip.[r+s+tan+tn+tpi]-qdiff.64-t13.g3.0-s5000.RUNNING/run-250626.154746.RUNNING/model/smooth.pt')
-    weights = torch.load('runs/diffusion/infinity_2b/infinity_2b/w.4-x.4-y.16/w.sint4-x.sint4.u-y.bf16/w.v64.bf16-x.v64.bf16-y.tnsr.bf16/smooth.proj-w.static.lowrank/shift-skip.x.[[w]+tan+tn].w.[e+tpo]-low.r32.i100.e.skip.[r+s+tan+tn+tpi]-smth.proj.GridSearch.bn2.[AbsMax].lr.skip.[r+s+tan+tn+tpi]-qdiff.64-t13.g3.0-s5000.RUNNING/run-250626.154746.RUNNING/model/model.pt', 
+    smoothing_scales = torch.load('runs/diffusion/infinity_2b/infinity_2b/w.4-x.4-y.16/w.sint4-x.sint4.u-y.bf16/w.v64.bf16-x.v64.bf16-y.tnsr.bf16/smooth.proj-w.static.lowrank/shift-skip.x.[[w]+tan+tn].w.[e+tpo]-low.r32.i100.e.skip.[r+s+tan+tn+tpi]-smth.proj.GridSearch.bn2.[AbsMax].lr.skip.[r+s+tan+tn+tpi]-qdiff.64-t13.g3.0-s128.RUNNING/run-250703.112819.RUNNING/model/smooth.pt')
+    weights = torch.load('runs/diffusion/infinity_2b/infinity_2b/w.4-x.4-y.16/w.sint4-x.sint4.u-y.bf16/w.v64.bf16-x.v64.bf16-y.tnsr.bf16/smooth.proj-w.static.lowrank/shift-skip.x.[[w]+tan+tn].w.[e+tpo]-low.r32.i100.e.skip.[r+s+tan+tn+tpi]-smth.proj.GridSearch.bn2.[AbsMax].lr.skip.[r+s+tan+tn+tpi]-qdiff.64-t13.g3.0-s128.RUNNING/run-250703.112819.RUNNING/model/model.pt', 
                          weights_only=True)
     quantized_model.load_state_dict(weights)
 

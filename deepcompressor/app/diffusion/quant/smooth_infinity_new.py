@@ -7,6 +7,7 @@ import typing as tp
 import math
 import datasets
 from deepcompressor.utils import tools
+from deepcompressor.utils.hooks import SimpleInputPackager, SimpleOutputPackager
 
 from deepcompressor.app.diffusion.config import DiffusionQuantConfig, DiffusionPtqRunConfig
 from deepcompressor.app.diffusion.nn.struct import DiffusionModelStruct, DiffusionBlockStruct
@@ -72,17 +73,14 @@ def smooth_infinity_model(
     print(f"Beginning smoothing for {num_blocks} transformer blocks...")
     with tqdm(total=num_blocks, desc="Smoothing Infinity Blocks") as pbar:
         for block_struct, aggregated_cache, block_kwargs in data_iterator:
-            if not smooth_cache:
-                smooth_attention_block(
-                    layer=block_struct,
-                    config=config,
-                    smooth_cache=smooth_cache,
-                    layer_cache=aggregated_cache,
-                    layer_kwargs=block_kwargs, # Pass the kwargs containing ca_kv
-                )
-                pbar.update(1)
-            else:
-                smooth_attention_block(layer=block_struct, config=config, smooth_cache=smooth_cache)
+            smooth_attention_block(
+                layer=block_struct,
+                config=config,
+                smooth_cache=smooth_cache,
+                layer_cache=aggregated_cache,
+                layer_kwargs=block_kwargs, # Pass the kwargs containing ca_kv
+            )
+            pbar.update(1)
 
     if config.smooth.enabled_proj:
         smooth_cache.setdefault("proj.fuse_when_possible", config.smooth.proj.fuse_when_possible)
@@ -147,31 +145,36 @@ def smooth_attention_block(
                         q_proj_key = attn.qkv_proj_key 
                         q_proj_name = attn.q_proj_name
                         logger.debug("- Smoothing Query Projection: %s", q_proj_name)
-                        
-                        q_smooth_scale = smooth_linear_modules(
-                            prevs=None,  # No fusible preceding layer
-                            modules=[attn.q_proj],
-                            scale=smooth_cache.get(q_proj_name, None),
-                            config=config.smooth.proj,
-                            weight_quantizer=Quantizer(config.wgts, key=q_proj_key),
-                            input_quantizer=Quantizer(config.ipts, channels_dim=-1, key=q_proj_key),
-                            inputs=layer_cache[q_proj_name].inputs,
-                            eval_inputs=layer_cache[attn.name].inputs,
-                            eval_module=attn,
-                            eval_kwargs=layer_kwargs,
-                            develop_dtype=config.develop_dtype,
-                        )
-                        smooth_cache[q_proj_name] = q_smooth_scale
+                        if q_proj_name not in smooth_cache:
+                            q_smooth_scale = smooth_linear_modules(
+                                prevs=None,  # No fusible preceding layer
+                                modules=[attn.q_proj],
+                                scale=smooth_cache.get(q_proj_name, None),
+                                config=config.smooth.proj,
+                                weight_quantizer=Quantizer(config.wgts, key=q_proj_key),
+                                input_quantizer=Quantizer(config.ipts, channels_dim=-1, key=q_proj_key),
+                                inputs=layer_cache[q_proj_name].inputs,
+                                eval_inputs=layer_cache[attn.name].inputs,
+                                eval_module=attn,
+                                eval_kwargs=layer_kwargs,
+                                develop_dtype=config.develop_dtype,
+                            )
+                            smooth_cache[q_proj_name] = q_smooth_scale
+                        else:
+                            q_smooth_scale = smooth_cache[q_proj_name]
                         # Since prevs=None, we register a hook to scale the activation at runtime.
-                        ActivationSmoother(q_smooth_scale, channels_dim=-1).as_hook().register(attn.q_proj)
-
+                        # Do this (replace 'DefaultInputPackager' with whatever you find):
+                        smoother = ActivationSmoother(q_smooth_scale, channels_dim=-1)
+                        smoother.input_packager = SimpleInputPackager()  # Use the actual class name
+                        smoother.as_hook().register(attn.q_proj)
+                        continue
                         # --- Step 2: Smooth the Key and Value Projections (to_k, to_v) together ---
                         # These are grouped because they share the same input (kv_compact from the text prompt).
                         kv_proj_key = attn.qkv_proj_key  # Use 'k' as the representative key
                         k_proj_name = attn.k_proj_name
                         v_proj_name = attn.v_proj_name
                         logger.debug("- Smoothing Key/Value Projections: %s & %s", k_proj_name, v_proj_name)
-
+                        
                         kv_smooth_scale = smooth_linear_modules(
                             prevs=None,  # No fusible preceding layer
                             modules=[attn.k_proj, attn.v_proj],
@@ -185,36 +188,18 @@ def smooth_attention_block(
                             eval_kwargs=layer_kwargs,
                             develop_dtype=config.develop_dtype,
                         )
-                        # Store the shared scale for both k and v for consistency
-                        smooth_cache[k_proj_name] = kv_smooth_scale
-                        smooth_cache[v_proj_name] = kv_smooth_scale
+                        # Store the scale with a unique key for this block's hook.
+                        kv_scale_key = f"{attn.name}.kv_smooth_scale"
+                        smooth_cache[kv_scale_key] = kv_smooth_scale
+                        # Add the hooks
+                        smoother = ActivationSmoother(kv_smooth_scale, channels_dim=-1)
+                        smoother.input_packager = SimpleInputPackager()  # Use the actual class name
+                        smoother.as_hook().register(attn.k_proj)
+                        smoother.as_hook().register(attn.v_proj)
 
-                        # --- Step 3: Handle the activation scaling for K and V ---
-                        # The input to to_k and to_v is nested in kwargs, so a standard hook won't work.
-                        # We use a forward_pre_hook to modify the kwargs right before the forward call.
-                        def scale_cross_attention_kv_input(module, args, kwargs):
-                            if 'ca_kv' in kwargs and kwargs['ca_kv'] is not None:
-                                kv_compact, cu_seqlens_k, max_seqlen_k = kwargs['ca_kv']
-                                device = kv_compact.device
-                                scale = kv_smooth_scale.to(device)
-                                
-                                # Reshape scale for broadcasting along the channel dimension
-                                view_shape = [1] * kv_compact.ndim
-                                view_shape[-1] = -1
-                                scale = scale.view(view_shape)
-                                
-                                # Apply the scaling to the tensor
-                                scaled_kv_compact = kv_compact.div(scale)
-                                
-                                # Repack the tuple in the kwargs
-                                kwargs['ca_kv'] = (scaled_kv_compact, cu_seqlens_k, max_seqlen_k)
-                            return args, kwargs
-
-                        # Register the custom hook on the main cross-attention module
-                        attn.module.register_forward_pre_hook(scale_cross_attention_kv_input)
-
-                        # --- Step 4: Handle the output projection ---
+                        # --- Step 5: Handle the output projection ---
                         # The original function for this is correct as it's a standalone layer.
+                        continue
                         smooth_cache = smooth_diffusion_out_proj(
                             attn=attn, config=config, smooth_cache=smooth_cache, block_cache=layer_cache, block_kwargs=layer_kwargs
                         )
@@ -222,6 +207,7 @@ def smooth_attention_block(
                         tools.logging.Formatter.indent_dec()
 
                 if block.ffn_struct is not None:
+                    continue
                     smooth_cache = smooth_diffusion_up_proj(
                         pre_ffn_norm=block.pre_ffn_norm,
                         ffn=block.ffn_struct,
@@ -233,6 +219,7 @@ def smooth_attention_block(
                         ffn=block.ffn_struct, config=config, smooth_cache=smooth_cache, block_cache=layer_cache
                     )
                 if block.add_ffn_struct is not None:
+                    continue
                     smooth_cache = smooth_diffusion_up_proj(
                         pre_ffn_norm=block.pre_add_ffn_norm,
                         ffn=block.add_ffn_struct,

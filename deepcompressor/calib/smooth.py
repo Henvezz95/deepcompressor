@@ -64,6 +64,7 @@ class ActivationSmoother(BaseTensorProcessor):
             `torch.Tensor`:
                 The smoothed tensor.
         """
+
         device, dtype = tensor.device, tensor.dtype
         if self.develop_dtype is None:
             self.develop_dtype = dtype

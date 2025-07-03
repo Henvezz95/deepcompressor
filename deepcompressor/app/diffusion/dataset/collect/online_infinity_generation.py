@@ -490,10 +490,7 @@ def get_stateful_cache(model: Infinity, config: DiffusionPtqRunConfig, pipeline_
     model.set_block(block_idx, module_idx)
     vae = load_visual_tokenizer(args)
     text_tokenizer, text_encoder = load_tokenizer(t5_path=args.text_encoder_ckpt)
-
-    batch_size = config.eval.batch_size
     print(f"In total {len(dataset)} samples")
-    print(f"Evaluating with batch size {batch_size}")
 
     # --- Loop through prompts and run generation ---
     for batch in tqdm(dataset.iter(batch_size=1), desc="Generating and Collecting Data"):
