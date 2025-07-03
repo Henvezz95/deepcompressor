@@ -128,7 +128,6 @@ def smooth_attention_block(
                 tools.logging.Formatter.indent_inc()
                 for attn in block.attn_structs:
                     if attn.name.split('.')[-1] == 'sa':
-                        continue
                         smooth_cache = smooth_diffusion_qkv_proj(
                             attn=attn, config=config, smooth_cache=smooth_cache, block_cache=layer_cache, block_kwargs=layer_kwargs
                         )
@@ -167,7 +166,7 @@ def smooth_attention_block(
                         smoother = ActivationSmoother(q_smooth_scale, channels_dim=-1)
                         smoother.input_packager = SimpleInputPackager()  # Use the actual class name
                         smoother.as_hook().register(attn.q_proj)
-                        continue
+
                         # --- Step 2: Smooth the Key and Value Projections (to_k, to_v) together ---
                         # These are grouped because they share the same input (kv_compact from the text prompt).
                         kv_proj_key = attn.qkv_proj_key  # Use 'k' as the representative key
@@ -199,7 +198,6 @@ def smooth_attention_block(
 
                         # --- Step 5: Handle the output projection ---
                         # The original function for this is correct as it's a standalone layer.
-                        continue
                         smooth_cache = smooth_diffusion_out_proj(
                             attn=attn, config=config, smooth_cache=smooth_cache, block_cache=layer_cache, block_kwargs=layer_kwargs
                         )
@@ -207,7 +205,6 @@ def smooth_attention_block(
                         tools.logging.Formatter.indent_dec()
 
                 if block.ffn_struct is not None:
-                    continue
                     smooth_cache = smooth_diffusion_up_proj(
                         pre_ffn_norm=block.pre_ffn_norm,
                         ffn=block.ffn_struct,
@@ -219,7 +216,6 @@ def smooth_attention_block(
                         ffn=block.ffn_struct, config=config, smooth_cache=smooth_cache, block_cache=layer_cache
                     )
                 if block.add_ffn_struct is not None:
-                    continue
                     smooth_cache = smooth_diffusion_up_proj(
                         pre_ffn_norm=block.pre_add_ffn_norm,
                         ffn=block.add_ffn_struct,
