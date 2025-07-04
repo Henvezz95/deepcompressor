@@ -52,8 +52,16 @@ def quantize_infinity_weights(
         tools.logging.Formatter.indent_inc()
         with tools.logging.redirect_tqdm():
             if branch_state_dict:
-                #### NO CODE IMPLEMENTATION FOR NOW ####
-                pass
+                for _, layer in tqdm(
+                    model.get_named_layers(skip_pre_modules=True, skip_post_modules=True).items(),
+                    desc="adding low-rank branches",
+                    leave=False,
+                    dynamic_ncols=True,
+                ):
+                    calibrate_diffusion_block_low_rank_branch(
+                        layer=layer, config=config, branch_state_dict=branch_state_dict
+                    )
+                    _ = data_iterator.next()
             else:
                 # Use the custom data loader to calibrate the branches
                 with tqdm(total=num_blocks, desc="Calibrating low-rank branches") as pbar:
