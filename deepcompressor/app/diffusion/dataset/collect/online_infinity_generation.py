@@ -1,4 +1,5 @@
 import os
+import time
 from dataclasses import dataclass
 import cv2
 
@@ -510,7 +511,8 @@ def get_stateful_cache(model: Infinity, config: DiffusionPtqRunConfig, pipeline_
                 sampling_per_bits=args.sampling_per_bits,
                 enable_positive_prompt=0
             )
-        cv2.imwrite('temp.png', generated_image.detach().cpu().numpy())
+        os.makedirs('./temp_imgs', exist_ok=True)
+        cv2.imwrite(f'./temp_imgs/temp_{str(time.time())}.png', generated_image.detach().cpu().numpy())
 
     result = model.collected_cache
     model.collected_cache = []

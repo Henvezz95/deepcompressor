@@ -128,6 +128,7 @@ def smooth_attention_block(
                 tools.logging.Formatter.indent_inc()
                 for attn in block.attn_structs:
                     if attn.name.split('.')[-1] == 'sa':
+                        continue
                         smooth_cache = smooth_diffusion_qkv_proj(
                             attn=attn, config=config, smooth_cache=smooth_cache, block_cache=layer_cache, block_kwargs=layer_kwargs
                         )
@@ -166,6 +167,7 @@ def smooth_attention_block(
                         smoother = ActivationSmoother(q_smooth_scale, channels_dim=-1)
                         smoother.input_packager = SimpleInputPackager()  # Use the actual class name
                         smoother.as_hook().register(attn.q_proj)
+                        continue
 
                         # --- Step 2: Smooth the Key and Value Projections (to_k, to_v) together ---
                         # These are grouped because they share the same input (kv_compact from the text prompt).
