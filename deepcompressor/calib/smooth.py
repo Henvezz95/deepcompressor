@@ -18,6 +18,8 @@ from .config import SearchBasedCalibObjective, SmoothCalibConfig, SmoothSpanMode
 from .metric import ChannelMetric
 from .search import SearchBasedCalibrator
 
+ACTIVATION_SAMPLES = []
+
 __all__ = [
     "smooth_linear_modules",
     "smooth_attention",
@@ -64,7 +66,53 @@ class ActivationSmoother(BaseTensorProcessor):
             `torch.Tensor`:
                 The smoothed tensor.
         """
+        """Process the tensor."""
+        '''
+        # --- START of temporary debug code ---
 
+        # Capture the "before" state
+        tensor_before = tensor.clone().detach()
+        
+        # Original scaling logic
+        device, dtype = tensor.device, tensor.dtype
+        if self.develop_dtype is None:
+            self.develop_dtype = dtype
+        self.smooth_scale = self.smooth_scale.to(device=device, dtype=self.develop_dtype)
+        tensor = tensor.to(dtype=self.develop_dtype)
+        smooth_scale_view_shape = [1] * tensor.ndim
+        smooth_scale_view_shape[self.channels_dim] = -1
+        smooth_scale = self.smooth_scale.view(smooth_scale_view_shape)
+
+        if self.upscale:
+            scaled_tensor = tensor.mul(smooth_scale)
+        else:
+            scaled_tensor = tensor.div(smooth_scale)
+
+        
+        # Capture the "after" state
+        tensor_after = scaled_tensor.clone().detach()
+
+        # --- Corrected analysis logic ---
+        # Use the variables defined in this function: tensor_before and tensor_after
+        per_channel_max_original = tensor_before.view(-1, tensor_before.shape[-1]).abs().max(dim=0).values
+        per_channel_max_smoothed = tensor_after.view(-1, tensor_after.shape[-1]).abs().max(dim=0).values
+
+        std_original = torch.std(per_channel_max_original)
+        std_smoothed = torch.std(per_channel_max_smoothed)
+
+        # Use tqdm.write for clean printing if running inside a tqdm loop
+        from tqdm import tqdm
+        tqdm.write(f"--- Smoothing Hook Analysis on tensor of shape {tensor.shape} ---")
+        tqdm.write(f"Std Dev Before: {std_original.item():.4f}")
+        tqdm.write(f"Std Dev After:  {std_smoothed.item():.4f}")
+        if std_smoothed > 1e-9:
+            tqdm.write(f"Smoothness Improvement: {std_original.item() / std_smoothed.item():.2f}x")
+        tqdm.write("-----------------------------------------------------------------")
+        
+        return scaled_tensor.to(dtype=dtype)
+        # --- END of temporary debug code ---
+        '''
+        #print('RUNNING ACTIVATION SMOOTHER!')
         device, dtype = tensor.device, tensor.dtype
         if self.develop_dtype is None:
             self.develop_dtype = dtype

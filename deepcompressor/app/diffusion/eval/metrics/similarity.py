@@ -60,8 +60,8 @@ def compute_image_similarity_metrics(
     ref_dirpath_or_dataset: str | datasets.Dataset,
     gen_dirpath: str,
     metrics: tuple[str, ...] = ("psnr", "lpips", "ssim"),
-    batch_size: int = 64,
-    num_workers: int = 8,
+    batch_size: int = 16,
+    num_workers: int = 0,
     device: str | torch.device = "cuda",
 ) -> dict[str, float]:
     if len(metrics) == 0:

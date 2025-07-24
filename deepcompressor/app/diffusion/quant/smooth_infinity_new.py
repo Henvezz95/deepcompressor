@@ -30,6 +30,8 @@ from .smooth import smooth_diffusion_layer, smooth_diffusion_qkv_proj, smooth_di
 from ..dataset.infinity_calib_loader_new import InfinityCalibManager
 from deepcompressor.app.diffusion.nn.struct_infinity import InfinityStruct
 
+ACTIVATION_SAMPLES = []
+
 @torch.inference_mode()
 def smooth_infinity_model(
     model: InfinityStruct,
@@ -44,12 +46,14 @@ def smooth_infinity_model(
     print("--- Starting Infinity-Aware Smoothing Process ---")
     config = config_loader.quant
     smooth_cache = smooth_cache or {}
+    '''
     if config.smooth.enabled_proj:
         if smooth_cache:
             assert smooth_cache.get("proj.fuse_when_possible", True) == config.smooth.proj.fuse_when_possible
     if config.smooth.enabled_attn:
         if smooth_cache:
             assert smooth_cache.get("attn.fuse_when_possible", True) == config.smooth.attn.fuse_when_possible
+    '''
     
     # 1. Instantiate our custom data manager.
     print("Initializing Infinity-aware calibration manager...")
@@ -128,7 +132,6 @@ def smooth_attention_block(
                 tools.logging.Formatter.indent_inc()
                 for attn in block.attn_structs:
                     if attn.name.split('.')[-1] == 'sa':
-                        continue
                         smooth_cache = smooth_diffusion_qkv_proj(
                             attn=attn, config=config, smooth_cache=smooth_cache, block_cache=layer_cache, block_kwargs=layer_kwargs
                         )
@@ -162,12 +165,12 @@ def smooth_attention_block(
                             smooth_cache[q_proj_name] = q_smooth_scale
                         else:
                             q_smooth_scale = smooth_cache[q_proj_name]
+
                         # Since prevs=None, we register a hook to scale the activation at runtime.
                         # Do this (replace 'DefaultInputPackager' with whatever you find):
                         smoother = ActivationSmoother(q_smooth_scale, channels_dim=-1)
                         smoother.input_packager = SimpleInputPackager()  # Use the actual class name
                         smoother.as_hook().register(attn.q_proj)
-                        continue
 
                         # --- Step 2: Smooth the Key and Value Projections (to_k, to_v) together ---
                         # These are grouped because they share the same input (kv_compact from the text prompt).
