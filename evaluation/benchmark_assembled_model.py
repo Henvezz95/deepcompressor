@@ -25,8 +25,7 @@ from deepcompressor.app.diffusion.config import DiffusionQuantConfig, DiffusionP
 from Infinity_rep.infinity.models.infinity import Infinity
 from Infinity_rep.tools.run_infinity import load_visual_tokenizer, load_tokenizer, gen_one_img, load_transformer
 from Infinity_rep.infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
-from deepcompressor.nn.patch.lowrank import LowRankBranch # Make sure to import this
-# --- WARNING: This script is for debugging only. Loading pickled models is not recommended for production. ---
+from deepcompressor.nn.patch.lowrank import LowRankBranch 
 from PIL import Image
 
 from build_functions import assemble_model
@@ -128,21 +127,35 @@ model_struct = InfinityStruct.construct(quantized_model)
 for name, module in quantized_model.named_modules():
     module.name = name
 
-model_struct = assemble_model(model_struct, ptq_config, branch_state_dict, smooth_scales, weights, False)
-
-del weights
-del branch_state_dict
-del smooth_scales
-gc.collect()
-print("--- Final model assembly complete. Running inference. ---\n")
-
 generation_args = { 'cfg_list': [3.0]*13, 'tau_list': [0.5]*13, 'g_seed': 16,
                     'gt_leak': 0, 'gt_ls_Bl': None, 'scale_schedule': scale_schedule,
                     'cfg_insertion_layer': [args.cfg_insertion_layer], 'vae_type': args.vae_type,
                     'sampling_per_bits': args.sampling_per_bits, 'enable_positive_prompt': True }
 
+#test_prompt = "A blue car"
+#test_args = generation_args.copy()
+#test_args['g_seed'] = 42
+#img1 = gen_one_img(model, vae, text_tokenizer, text_encoder, test_prompt, **test_args).cpu().detach().numpy()
+#model_struct = assemble_model(model_struct, ptq_config, branch_state_dict, smooth_scales, weights, True)
+
+del weights
+del branch_state_dict
+del smooth_scales
+gc.collect()
+#print("--- Final model assembly complete. Running inference. ---\n")
+
+#img2 = gen_one_img(quantized_model, vae, text_tokenizer, text_encoder, test_prompt, **test_args).cpu().detach().numpy()
+
+#print(f"FP16 mean: {img1.mean()}")
+#print(f"Quantized mean: {img2.mean()}")
+#print(f"Difference: {abs(img1.mean() - img2.mean())}")
+
 infinity_pipeline = InfinityPipelineWrapper(quantized_model, vae, text_tokenizer, text_encoder, generation_args)
 #infinity_pipeline = InfinityPipelineWrapper(model, vae, text_tokenizer, text_encoder, generation_args)
+
+print(f"--- LAUNCHING EVALUATION ---")
+print(f"  > Generated Images Path: {eval_config.gen_root}")
+print(f"  > Reference Images Path: {eval_config.ref_root}")
 
 results = eval_config.evaluate(infinity_pipeline, skip_gen=False, task=ptq_config.pipeline.task)
 

@@ -135,7 +135,8 @@ def assemble_model(model_struct: InfinityStruct,
                    configs: DiffusionPtqRunConfig, 
                    branch_state_dict: dict, 
                    smooth_scales: dict, weights:dict, 
-                   quantize_activations = True):
+                   quantize_activations = True,
+                   skip_ca_kv_act = False):
     
     config = configs.quant
     
@@ -145,13 +146,17 @@ def assemble_model(model_struct: InfinityStruct,
     if quantize_activations:
         for module_key, module_name, module, _, _ in model_struct.named_key_modules():
             # Check if this layer should have its activations quantized
-            if config.ipts.is_enabled_for(module_key):
-                #if 'ca.to_k' not in module_name and 'ca.to_v' not in module_name:
-                quantizer = Quantizer(config.ipts, key=module_name, channels_dim=-1)
-                
-                # The crucial fix:
-                quantizer.input_packager = SimpleInputPackager()
-                quantizer.as_hook().register(module)
+            if not config.ipts.is_enabled_for(module_key):
+                print(f'Skipping {module_name} activation quantization - 1')
+                continue
+            # Skips kv projection input quantization in cross attention layers if skip_ca_kv_act is enabled
+            if skip_ca_kv_act and ('ca.to_k' in module_name or 'ca.to_v' in module_name):
+                print(f'Skipping {module_name} activation quantization - 2')
+                continue
+            
+            quantizer = Quantizer(config.ipts, key=module_name, channels_dim=-1)
+            quantizer.input_packager = SimpleInputPackager()
+            quantizer.as_hook().register(module)
 
 
     # Load the quantized weights
