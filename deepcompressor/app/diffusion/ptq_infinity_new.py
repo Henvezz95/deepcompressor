@@ -5,6 +5,7 @@ import pprint
 import traceback
 import sys
 import datasets
+from tqdm import tqdm
 
 sys.path.append('.') 
 sys.path.append('/workspace/deepcompressor/Infinity_rep/') 
@@ -32,6 +33,7 @@ from .quant import (
 )
 from .quant.smooth_infinity_new import smooth_infinity_model as smooth_diffusion
 from .quant.weight_infinity_new import quantize_infinity_weights as quantize_diffusion_weights
+from .dataset.infinity_calib_loader_new import InfinityCalibManager
 
 # Your model loading utilities
 from .dataset.collect.online_infinity_generation import StatefulInfinity, load_transformer, load_visual_tokenizer, args
@@ -88,7 +90,8 @@ def ptq(  # noqa: C901
     load_model_path, load_path, save_path = "", None, None
     if load_dirpath:
         load_path = DiffusionQuantCacheConfig(
-            smooth=os.path.join(load_dirpath, "smooth.pt"),
+            #smooth=os.path.join(load_dirpath, "smooth.pt"),
+            smooth = 'smooth.pt',
             branch=os.path.join(load_dirpath, "branch.pt"),
             wgts=os.path.join(load_dirpath, "wgts.pt"),
             acts=os.path.join(load_dirpath, "acts.pt"),
@@ -145,7 +148,8 @@ def ptq(  # noqa: C901
             smooth_diffusion(model, configuration, other_configs, smooth_cache=smooth_cache)
         else:
             logger.info("- Generating smooth scales")
-            smooth_cache = smooth_diffusion(model, config)
+            smooth_cache = {}
+            smooth_diffusion(model, configuration, other_configs, smooth_cache=smooth_cache)
             if cache and cache.path.smooth:
                 logger.info(f"- Saving smooth scales to {cache.path.smooth}")
                 os.makedirs(cache.dirpath.smooth, exist_ok=True)
@@ -350,7 +354,21 @@ def main(config: DiffusionPtqRunConfig, unused_cfgs: dict, logging_level: int = 
         )
     print('Done')
     print('Quantized model saved to:', save_dirpath)
-
+    
+    print(' Generating Evaluation Images')
+    calib_manager = InfinityCalibManager(
+        model = model, 
+        config = config, 
+        other_configs = unused_cfgs, 
+        smooth_cache = {}
+    )
+    
+    num_blocks = len(list(model.iter_transformer_block_structs()))
+    data_iterator = calib_manager.iter_layer_activations()
+    with tqdm(total=num_blocks, desc="Smoothing Infinity Blocks") as pbar:
+        for block_struct, aggregated_cache, block_kwargs in data_iterator:
+            print('Images Generated!')
+            break
 
 if __name__ == "__main__":
     config, _, unused_cfgs, unused_args, unknown_args = DiffusionPtqRunConfig.get_parser().parse_known_args()
