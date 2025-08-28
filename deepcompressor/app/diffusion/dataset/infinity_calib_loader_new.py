@@ -27,7 +27,9 @@ class InfinityCalibManager:
     """
     Online input generator for Stateful Infinity Model
     """
-    def __init__(self, model: InfinityStruct, config: DiffusionPtqRunConfig, other_configs: dict, smooth_cache: dict[str, torch.Tensor] | None = None):
+    def __init__(self, model: InfinityStruct, config: DiffusionPtqRunConfig, 
+                 other_configs: dict, smooth_cache: dict[str, torch.Tensor] | None = None,
+                 save_kv_cache_only: bool = False, save_imgs: bool = True, skip_keys = []):
         self.model_struct = model
         self.config = config
         
@@ -39,6 +41,9 @@ class InfinityCalibManager:
         )
         self.dataset = dataset
         self.pipeline_config = pipeline_config
+        self.save_kv_cache_only = save_kv_cache_only
+        self.save_imgs = save_imgs
+        self.skip_keys = skip_keys
 
         if not smooth_cache or smooth_cache is None:
             self.skip = False
@@ -53,14 +58,17 @@ class InfinityCalibManager:
         device = next(self.model_struct.module.parameters()).device
         for block_struct in self.model_struct.iter_transformer_block_structs():
             name = block_struct.name
-            blck_idx = int(name.split('.')[1])
-            mod_idx = int(name.split('.')[3])
-            self.model_struct.module.set_block(blck_idx, mod_idx)
-            if self.skip:
+            if any([k in name for k in self.skip_keys]):
                 yield block_struct, {}, {}
                 continue
 
-            collected_data_list = get_stateful_cache(self.model_struct.module, self.config, self.pipeline_config, self.dataset, blck_idx, mod_idx)
+            # 1. Get cache from the required block
+            blck_idx = int(name.split('.')[1])
+            mod_idx = int(name.split('.')[3])
+            self.model_struct.module.set_block(blck_idx, mod_idx)
+
+            collected_data_list = get_stateful_cache(self.model_struct.module, self.config, self.pipeline_config, 
+                                                     self.dataset, blck_idx, mod_idx, save_kv_cache_only=self.save_kv_cache_only, save_imgs=self.save_imgs)
             
             # 2. Initialize structures to hold the re-packaged data
             aggregated_inputs = defaultdict(list)
@@ -79,7 +87,7 @@ class InfinityCalibManager:
             # 4. Package the aggregated inputs into the IOTensorsCache format
             final_aggregated_cache = {}
 
-            # Define a clear mapping from the simple hook names to the required module name suffixes
+            # 5. Define a clear mapping from the simple hook names to the required module name suffixes
             key_to_suffix_map = {
                 'sa': '.sa',
                 'ca': '.ca', 
@@ -93,6 +101,8 @@ class InfinityCalibManager:
                 'ca_out': '.ca.proj',
                 'ffn_fc1': '.ffn.fc1',
                 'ffn_fc2': '.ffn.fc2',
+                'sa_k_final': '.sa.k.cache',
+                'sa_v_final': '.sa.v.cache'
             }
             
             base_name = block_struct.name 
@@ -119,10 +129,10 @@ class InfinityCalibManager:
                 tensors_cache = TensorsCache(tensors=OrderedDict([(0, tensor_cache)]))
                 final_aggregated_cache[full_module_name] = IOTensorsCache(inputs=tensors_cache)
 
-            # 5. Yield the final structures for the current block
+            # 6. Yield the final structures for the current block
             yield block_struct, final_aggregated_cache, block_kwargs_list
             
-            # 6. Clean up memory before processing the next block
+            # 7. Clean up memory before processing the next block
             del collected_data_list, aggregated_inputs, block_kwargs_list, final_aggregated_cache
             gc.collect()
             if torch.cuda.is_available():
