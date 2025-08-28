@@ -136,7 +136,7 @@ generation_args = { 'cfg_list': [3.0]*13, 'tau_list': [0.5]*13, 'g_seed': 16,
 #test_args = generation_args.copy()
 #test_args['g_seed'] = 42
 #img1 = gen_one_img(model, vae, text_tokenizer, text_encoder, test_prompt, **test_args).cpu().detach().numpy()
-#model_struct = assemble_model(model_struct, ptq_config, branch_state_dict, smooth_scales, weights, True)
+model_struct = assemble_model(model_struct, ptq_config, branch_state_dict, smooth_scales, weights, True)
 
 del weights
 del branch_state_dict
@@ -159,6 +159,6 @@ print(f"  > Reference Images Path: {eval_config.ref_root}")
 
 results = eval_config.evaluate(infinity_pipeline, skip_gen=False, task=ptq_config.pipeline.task)
 
-#logger.info(f"* Saving results to {ptq_config.output.job_dirpath}")
-#with open(ptq_config.output.get_running_job_path("results.json"), "w") as f:
-#    json.dump(results, f, indent=2, sort_keys=True)
+logger.info(f"* Saving results to {ptq_config.output.job_dirpath}")
+with open(ptq_config.output.get_running_job_path("results.json"), "w") as f:
+    json.dump(results, f, indent=2, sort_keys=True)

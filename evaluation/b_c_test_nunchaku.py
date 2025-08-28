@@ -112,7 +112,7 @@ dtype = torch.float16
 
 # 2. Choose a target layer to test
 # Let's pick the first FFN's input layer for simplicity.
-layer_name = "block_chunks.1.module.2.ffn.fc2"
+layer_name = "block_chunks.6.module.2.ffn.fc1"
 target_golden_layer = golden_model.get_submodule(layer_name)
 
 

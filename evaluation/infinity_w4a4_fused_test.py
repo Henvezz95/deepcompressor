@@ -15,14 +15,14 @@ sys.path.append('./Infinity_rep')
 
 # We need to import the loader functions
 from tools.run_infinity import load_visual_tokenizer, load_transformer, load_tokenizer, gen_one_img, h_div_w_templates, dynamic_resolution_h_w
-from evaluation.quantized_layers import SVDQuantLinear, swap_mlp_for_svdquant_fused
-from evaluation.quantized_layers import swap_linear_for_svdquant
+from evaluation.quantized_layers import SVDQuantLinear, swap_mlp_for_svdquant_fused, load_svdquant_weights
+from evaluation.quantized_layers import swap_linear_for_svdquant, load_svdquant_artifacts, SVDQuantFusedMLP
 
 # --- Main Test Execution ---
 def main():
     print("--- Loading a real Infinity model from checkpoint ---")
     
-    '''
+    
     args = argparse.Namespace(
         pn='1M', model_path='/workspace/Infinity/weights/infinity_2b_reg.pth',
         vae_path='/workspace/Infinity/weights/infinity_vae_d32reg.pth',
@@ -48,7 +48,7 @@ def main():
         text_channels=2048, apply_spatial_patchify=1, h_div_w_template=1.000,
         use_flex_attn=0, cache_dir='/dev/shm', checkpoint_type='torch_shard',
         bf16=1, save_file='tmp.jpg'
-    )
+    )'''
 
     
     vae = load_visual_tokenizer(args)
@@ -104,7 +104,7 @@ def main():
                                                                           'text_norm', 'norm0_cond', 
                                                                           'text_proj_for_sos', 'text_proj_for_ca', 
                                                                           'lvl_embed', 'shared_ada_lin', 
-                                                                          'head_nm', 'ca.mat_kv', 'fc1', 'fc2']) 
+                                                                          'head_nm', 'ca.mat_kv', 'block_chunks.5.module.0'])
     
     replaced = swap_mlp_for_svdquant_fused(
         svdquant_model,
@@ -114,10 +114,10 @@ def main():
         group_size=64,         # matches our synthetic per-group scales
         exclude_names=["text_proj_for_ca.*"]
     )
-    print(f"Fused {len(replaced)} MLPs:")
-    for k in replaced:
-        print(" -", k)
-    
+
+    base_path = '../deepcompressor/runs/diffusion/int4_rank32_batch12/model/'
+    arts = load_svdquant_artifacts(base_path)  # contains model.pt, scale.pt, branch.pt, smooth.pt
+    report = load_svdquant_weights(svdquant_model, arts, strict=True, dry_run=False)
     # --- IMPORTANT: CLEAR MEMORY ---
     #del model
     torch.cuda.empty_cache()
@@ -126,12 +126,13 @@ def main():
     torch.cuda.reset_peak_memory_stats()
 
     for i in range(5):
-        _ = gen_one_img(
+        img = gen_one_img(
             svdquant_model_to_run,
             vae,
             text_tokenizer,
             text_encoder,
-            'A photorealistic image of a dog working as a professor at MIT university giving a lesson on Autoregressive Models for NLP',
+            'A photorealistic image of a dog working as a professor at MIT university giving ' \
+            'a lesson on Autoregressive Models for NLP',
             g_seed=16,
             gt_leak=0,
             gt_ls_Bl=None,
@@ -141,8 +142,9 @@ def main():
             cfg_insertion_layer=[args.cfg_insertion_layer],
             vae_type=args.vae_type,
             sampling_per_bits=args.sampling_per_bits,
-            enable_positive_prompt=True,
+            enable_positive_prompt=False,
         )
+        cv2.imwrite('img.png', img.detach().cpu().numpy())
 
     svdquant_peak_mem = torch.cuda.max_memory_allocated() / (1024**3)
     print(f"SVDQuant Peak Memory: {svdquant_peak_mem:.2f} GB")
