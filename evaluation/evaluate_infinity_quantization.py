@@ -23,7 +23,7 @@ from Infinity_rep.tools.run_infinity import load_visual_tokenizer, load_tokenize
 from Infinity_rep.infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
 from deepcompressor.nn.patch.lowrank import LowRankBranch # Make sure to import this
 
-from evaluation.build_functions import assemble_model
+from evaluation.build_functions import assemble_model, attach_kv_qparams
 
 
 # --- Your Original Setup Code ---
@@ -39,6 +39,7 @@ args = argparse.Namespace(
     checkpoint_type='torch', seed=0, bf16=0, save_file='tmp.jpg',
     enable_model_cache=0
 )
+enable_kv_quant = True
 
 # You will need your quantization config to initialize the activation quantizers
 # This is a placeholder for your actual config loading
@@ -88,8 +89,11 @@ model_struct = assemble_model(model_struct,
                               branch_state_dict, 
                               smooth_scales, 
                               weights, 
-                              quantize_activations = True,
+                              quantize_activations = False,
                               skip_ca_kv_act = False)
+
+if enable_kv_quant:
+    attach_kv_qparams(quantized_model, os.path.join('runs/', "kv_scales", "kv_quant_calib.pt"))
 
 del weights
 del branch_state_dict
@@ -115,6 +119,6 @@ img = gen_one_img(
     enable_positive_prompt=True,
 )
 
-file_name = 'img_patched_quantized_w4a4.jpg'
+file_name = 'img_patched_quantized_w4a16_kv8.jpg'
 cv2.imwrite(file_name, img.detach().cpu().numpy())
 print(f"Generated test image: {file_name}")

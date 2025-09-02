@@ -13,7 +13,6 @@ import numpy as np
 from flash_attn import flash_attn_varlen_kvpacked_func
 
 # --- Configure Python Path to Find Modules ---
-sys.path.append('./') 
 sys.path.append('./Infinity_rep') 
 
 # --- Real Imports from DeepCompressor and Infinity Libraries ---
@@ -56,7 +55,7 @@ class PatchedSelfAttention(Attention):
     It overrides the __init__ and forward methods to replicate the exact behavior
     of the original Infinity SelfAttention layer with unfused projections.
     """
-    def __init__(self, original_sa_module: SelfAttention, module_name=None):
+    def __init__(self, original_sa_module: SelfAttention, module_name=None, kv_quant_enabled=False):
         dim_head = original_sa_module.proj.in_features // original_sa_module.num_heads
         super().__init__(
             query_dim=original_sa_module.proj.in_features,
@@ -65,6 +64,7 @@ class PatchedSelfAttention(Attention):
             bias=True
         )
         
+        self.num_heads, self.head_dim = original_sa_module.num_heads, dim_head
         self.module_name = module_name
         original_qkv_weight = original_sa_module.mat_qkv.weight
         q_w, k_w, v_w = torch.chunk(original_qkv_weight, 3, dim=0)
@@ -94,9 +94,15 @@ class PatchedSelfAttention(Attention):
         self.caching = False
         self.cached_k = None
         self.cached_v = None
-
         self.last_k = None
         self.last_v = None
+
+        # KV quantization int8 (opt-in)
+        self.kv_quant_enabled = kv_quant_enabled
+        self.k_scale = None   # tensor(C,) or (H,c), float32  -- per-channel K scales
+        self.k_zp    = None   # tensor(C,) or (H,c), int32    -- per-channel K zero points
+        self.v_scale = None   # tensor(C,) or (H,c), float32
+        self.v_zp    = None   # tensor(C,) or (H,c), int32
 
         self.proj = self.to_out[0]
 
@@ -109,6 +115,7 @@ class PatchedSelfAttention(Attention):
         """
         A robust forward method that handles potentially missing non-tensor arguments.
         """
+        L_dim = 2
         sa_kv_cache = kwargs.get('sa_kv_cache', {})
 
         #  Get the specific cache for THIS module using its key 'sa'
@@ -135,21 +142,52 @@ class PatchedSelfAttention(Attention):
 
         # Cache can be stored internally or received through kwargs
         # To keep compatibility with both Infinity and Deepcompressor
-        if self.caching:
-            if self.cached_k is None:
-                self.cached_k, self.cached_v = k, v
+        if self.caching:    # kv caching: only used during inference
+            if self.kv_quant_enabled:
+                # ---- per-(head,channel) broadcast helpers ----
+                def _prep_param(p, dtype, device):
+                    p = p.to(device=device, dtype=dtype)
+                    if p.ndim == 1:
+                        p = p.view(self.num_heads, self.head_dim)
+                    shape = [1] * k.ndim
+                    if L_dim == 1:     # BLHc
+                        shape[-2], shape[-1] = self.num_heads, self.head_dim
+                    else:              # BHLc
+                        shape[1],  shape[-1] = self.num_heads, self.head_dim
+                    return p.view(*shape)
+
+                # move qparams once
+                k_s = _prep_param(self.k_scale, torch.float32, k.device)
+                k_z = _prep_param(self.k_zp,    torch.int32,   k.device).to(torch.float32)
+                v_s = _prep_param(self.v_scale, torch.float32, v.device)
+                v_z = _prep_param(self.v_zp,    torch.int32,   v.device).to(torch.float32)
+
+                # quantize this step (per-channel affine)
+                k_q = torch.round(k.to(torch.float32) / k_s + k_z).clamp(-128, 127).to(torch.int8)
+                v_q = torch.round(v.to(torch.float32) / v_s + v_z).clamp(-128, 127).to(torch.int8)
+
+                # append to int8 cache
+                if self.cached_k is None:
+                    self.cached_k, self.cached_v = k_q, v_q
+                else:
+                    self.cached_k = torch.cat((self.cached_k, k_q), dim=L_dim)
+                    self.cached_v = torch.cat((self.cached_v, v_q), dim=L_dim)
+
+                # dequantize the full cache for compute (broadcast over L)
+                k = (self.cached_k.to(torch.float32) - k_z) * k_s
+                v = (self.cached_v.to(torch.float32) - v_z) * v_s
+                # flash wants k,v to match v.dtype
+                k = k.to(v.dtype)
+                v = v.to(v.dtype)
             else:
-                self.cached_k = torch.cat((self.cached_k, k), dim=2)
-                self.cached_v = torch.cat((self.cached_v, v), dim=2)
-            k_final, v_final = self.cached_k, self.cached_v
-        else:
-            if past_k is not None:
-                k_final = torch.cat([past_k, k], dim=2)
-                v_final = torch.cat([past_v, v], dim=2)
-            else:
-                k_final, v_final = k, v
+                # original fp/bf16 caching path
+                if self.cached_k is None:
+                    self.cached_k = k; self.cached_v = v
+                else:
+                    k = self.cached_k = torch.cat((self.cached_k, k), dim=L_dim)
+                    v = self.cached_v = torch.cat((self.cached_v, v), dim=L_dim)
             
-        out = F.scaled_dot_product_attention(q, k_final, v_final, attn_mask=attention_mask, scale=self.scale)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, scale=self.scale)
         
         out = out.transpose(1, 2).reshape(B, L_current, C)
         out = self.to_out[0](out)
