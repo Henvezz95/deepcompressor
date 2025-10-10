@@ -36,7 +36,7 @@ from .quant.weight_infinity_new import quantize_infinity_weights as quantize_dif
 from .dataset.infinity_calib_loader_new import InfinityCalibManager
 
 # Your model loading utilities
-from .dataset.collect.online_infinity_generation import StatefulInfinity, load_transformer, load_visual_tokenizer, args
+from .dataset.collect.online_infinity_generation import StatefulInfinity, load_transformer, load_visual_tokenizer, args_2b, args_8b
 from .dataset.collect.calib import CollectConfig
 
 
@@ -320,6 +320,12 @@ def main(config: DiffusionPtqRunConfig, unused_cfgs: dict, logging_level: int = 
     logger.info("* Building diffusion model pipeline")
     tools.logging.Formatter.indent_inc()
     if "nf4" not in config.pipeline.name and "gguf" not in config.pipeline.name:
+        if config.pipeline.name == 'infinity_2b':
+            args = args_2b
+        elif config.pipeline.name == 'infinity_8b':
+            args = args_8b
+        else:
+            raise NotImplementedError(f"Pipeline {config.pipeline.name} not implemented")
         vae = load_visual_tokenizer(args)
         infinity_model = load_transformer(vae, args)
         print("✅ Successfully loaded Infinity model.")

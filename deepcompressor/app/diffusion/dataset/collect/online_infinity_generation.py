@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import cv2
 
 import sys
-sys.path.append('/workspace/deepcompressor/Infinity_rep/')
+sys.path.append('../Infinity_rep/')
 
 import datasets
 import torch
@@ -14,14 +14,14 @@ from tqdm import tqdm
 
 from deepcompressor.app.diffusion.config import DiffusionPtqRunConfig
 from deepcompressor.utils.common import hash_str_to_int, tree_map, tree_split
-from Infinity_rep.infinity.models.infinity import Infinity 
+from infinity.models.infinity import Infinity 
 from Infinity_rep.tools.run_infinity import *
 
 from deepcompressor.app.diffusion.dataset.data import get_dataset
 
-from Infinity_rep.infinity.models.infinity import Infinity, CrossAttnBlock, sample_with_top_k_top_p_also_inplace_modifying_logits_
-from Infinity_rep.tools.run_infinity import load_visual_tokenizer, load_tokenizer, gen_one_img
-from Infinity_rep.infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
+from infinity.models.infinity import Infinity, CrossAttnBlock, sample_with_top_k_top_p_also_inplace_modifying_logits_
+from tools.run_infinity import load_visual_tokenizer, load_tokenizer, gen_one_img
+from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
 from contextlib import contextmanager
 from deepcompressor.app.diffusion.dataset.collect.calib import CollectConfig
 
@@ -38,7 +38,7 @@ text_encoder_ckpt = '/workspace/Infinity/weights/flan-t5-xl'
 h_div_w = 1/1 
 enable_positive_prompt = 0
 
-args = argparse.Namespace(
+args_2b = argparse.Namespace(
     pn='1M',
     model_path=model_path,
     cfg_insertion_layer=0,
@@ -63,9 +63,20 @@ args = argparse.Namespace(
     save_file='tmp.jpg',
     enable_model_cache=0
 )
+args_8b=argparse.Namespace(
+    pn='1M', model_path='/workspace/deepcompressor/Infinity_rep/weights/infinity_8b_weights',
+    vae_path='/workspace/Infinity/weights/infinity_vae_d56_f8_14_patchify.pth',
+    text_encoder_ckpt='/workspace/Infinity/weights/flan-t5-xl',
+    cfg_insertion_layer=0, vae_type=14, add_lvl_embeding_only_first_block=1,
+    use_bit_label=1, model_type='infinity_8b', rope2d_each_sa_layer=1,
+    rope2d_normalized_by_hw=2, use_scale_schedule_embedding=0, sampling_per_bits=1,
+    text_channels=2048, apply_spatial_patchify=1, h_div_w_template=1.000,
+    use_flex_attn=0, cache_dir='/dev/shm', checkpoint_type='torch_shard',
+    bf16=1, save_file='tmp.jpg'
+)
 
 h_div_w_template_ = h_div_w_templates[np.argmin(np.abs(h_div_w_templates-h_div_w))]
-scale_schedule = dynamic_resolution_h_w[h_div_w_template_][args.pn]['scales']
+scale_schedule = dynamic_resolution_h_w[h_div_w_template_]['1M']['scales']
 scale_schedule = [(1, h, w) for (_, h, w) in scale_schedule]
 
 class StatefulInfinity(Infinity):
@@ -80,10 +91,50 @@ class StatefulInfinity(Infinity):
         self.collected_cache = []
         self.block_index = 0
         self.module_index = 0
+        self.capture_schedule = None
 
     def set_block(self, block_index, module_index):
         self.block_index = block_index
         self.module_index = module_index
+
+    def set_capture_schedule(self, schedule: dict[int, int], capture_once=False):
+        """
+        Define how many times to capture each VAR scale step.
+
+        Args:
+            schedule: dict[int, int]
+                Mapping from scale index (si) -> number of remaining captures.
+                Example: {0:64, 1:64, 2:64, 3:64, 4:12, 5:12, ...}
+            capture_once: bool
+                If True, stop capturing after the schedule is exhausted.
+        """
+        self.capture_schedule = dict(schedule)
+        self.capture_once = bool(capture_once)
+        self._capture_done = False
+
+    def _should_capture_step(self, si: int) -> bool:
+        """
+        Return True if this scale step should be captured now.
+        """
+        if not hasattr(self, "capture_schedule") or self.capture_schedule is None:
+            # fallback: capture all steps
+            return not getattr(self, "_capture_done", False)
+        return self.capture_schedule.get(si, 0) > 0
+
+
+    def _update_capture_counter(self, si: int):
+        """
+        Decrement the counter for step `si` after one capture.
+        """
+        if not hasattr(self, "capture_schedule") or self.capture_schedule is None:
+            return
+        if si in self.capture_schedule:
+            self.capture_schedule[si] -= 1
+            if self.capture_schedule[si] <= 0:
+                del self.capture_schedule[si]
+        # stop if all done
+        if self.capture_once and not self.capture_schedule:
+            self._capture_done = True
 
     def reset_cache(self):
         """
@@ -180,6 +231,7 @@ class StatefulInfinity(Infinity):
         summed_codes = 0
         for si, pn in enumerate(scale_schedule):   # si: i-th segment
             cfg = cfg_list[si]
+            capturing_this_step = self._should_capture_step(si)
             if si >= trunk_scale:
                 break
             cur_L += np.array(pn).prod()
@@ -270,7 +322,18 @@ class StatefulInfinity(Infinity):
                     if m_idx == self.module_index and block_idx == self.block_index:
                         # The forward pass of module 'm' has just run, triggering the hooks.
                         # Now, save the collected data and clean up.
-                        self.collected_cache.append(calibration_data)
+                        #self.collected_cache.append(calibration_data)
+                        if capturing_this_step and (m_idx == self.module_index) and (block_idx == self.block_index):
+                            self.collected_cache.append(calibration_data)
+                            for handle in handles:
+                                handle.remove()
+                            # decrement the step counter if scheduled
+                            if self.capture_schedule and si in self.capture_schedule:
+                                self.capture_schedule[si] -= 1
+                                if self.capture_schedule[si] <= 0:
+                                    del self.capture_schedule[si]
+                            if self.capture_once and not self.capture_schedule:
+                                self._capture_done = True
 
                         # Remove all the hooks to prevent them from firing again
                         for handle in handles:
@@ -487,13 +550,28 @@ def load_transformer(vae, args):
     return infinity
 
 
-def get_stateful_cache(model: Infinity, config: DiffusionPtqRunConfig, pipeline_config: dict, dataset: datasets.Dataset, block_idx: int, module_idx: int):
+def get_stateful_cache(model: Infinity, config: DiffusionPtqRunConfig, pipeline_config: dict, 
+                       dataset: datasets.Dataset, block_idx: int, module_idx: int, save_kv_cache_only: bool = False, save_imgs: bool = False):
     model.set_block(block_idx, module_idx)
+    if config.pipeline.name == 'infinity_2b':
+        args = args_2b
+    elif config.pipeline.name == 'infinity_8b':
+        args = args_8b
+    else:
+        raise NotImplementedError(f"Pipeline {config.pipeline.name} not implemented")
     vae = load_visual_tokenizer(args)
     text_tokenizer, text_encoder = load_tokenizer(t5_path=args.text_encoder_ckpt)
     print(f"In total {len(dataset)} samples")
 
+    all_final_entries = [] 
+
     # --- Loop through prompts and run generation ---
+    #schedule = {si: (64 if si < 4 else 2) for si in range(len(scale_schedule))}
+    schedule = {si: (64 if si < 4 else 1) for si in range(len(scale_schedule))}
+
+    # Apply it to the model
+    model.set_capture_schedule(schedule)
+    
     for batch in tqdm(dataset.iter(batch_size=1), desc="Generating and Collecting Data"):
         prompt = batch["prompt"][0]
         filename = batch["filename"][0]
@@ -511,12 +589,37 @@ def get_stateful_cache(model: Infinity, config: DiffusionPtqRunConfig, pipeline_
                 sampling_per_bits=args.sampling_per_bits,
                 enable_positive_prompt=0
             )
-        os.makedirs('./temp_imgs', exist_ok=True)
-        cv2.imwrite(f'./temp_imgs/temp_{str(time.time())}.png', generated_image.detach().cpu().numpy())
+        if save_kv_cache_only:
+            # keep ONLY the final KV cache for this generation
+            final_entry = None
+            for d in reversed(model.collected_cache):
+                ek = d.get("eval_kwargs", {})
+                kv = ek.get("sa_kv_cache", {})
+                sa = kv.get("sa", {}) if isinstance(kv, dict) else {}
+                if "k" in sa or "v" in sa:
+                    final_entry = {
+                        "sa_k_final": sa.get("k").detach() if torch.is_tensor(sa.get("k")) else None,
+                        "sa_v_final": sa.get("v").detach() if torch.is_tensor(sa.get("v")) else None,
+                    }
+                    break
+
+            if final_entry is not None:
+                all_final_entries.append(final_entry)
+
+            # clear per-step scratch from the model for the next image
+            model.collected_cache.clear()
+            torch.cuda.empty_cache(); gc.collect()
+
+
+        if save_imgs:
+            os.makedirs('./temp_imgs', exist_ok=True)
+            cv2.imwrite(f'./temp_imgs/temp_{str(time.time())}.png', generated_image.detach().cpu().numpy())
 
     result = model.collected_cache
     model.collected_cache = []
     model.reset_cache()
+    if save_kv_cache_only:
+        result = all_final_entries
     return result
 
 

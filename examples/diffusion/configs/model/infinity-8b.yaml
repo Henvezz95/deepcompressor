@@ -1,0 +1,75 @@
+# Configuration for quantizing the Infinity-2B model
+
+pipeline:
+  name: infinity_8b
+  dtype: torch.bfloat16
+  model_path: '/workspace/Infinity/weights/infinity_8b_reg.pth'
+  vae_path: '/workspace/Infinity/weights/infinity_vae_d32reg.pth'
+  text_encoder_ckpt: '/workspace/Infinity/weights/flan-t5-xl'
+
+eval:
+  # Standard evaluation settings, can be adjusted as needed
+  num_steps: 13 # Infinity's default number of scales
+  guidance_scale: 3.0
+  num_samples: 128
+  protocol: autoregressive-s{num_steps}-g{guidance_scale}
+  batch_size: 1
+  gen_root: './evaluation_output/infinity_w4a4' # New folder for this experiment's results
+  ref_root: ''
+
+
+quant:
+  # Calibration settings - good defaults to start with
+  calib:
+    batch_size: 8
+
+  # --- Weight Quantization Settings ---
+  wgts:
+    calib_range:
+      element_batch_size: 64
+      sample_batch_size: 16
+      element_size: 512
+      sample_size: -1
+    low_rank:
+      sample_batch_size: 16
+      sample_size: -1
+    # This is the most important section.
+    # We define which layers to EXCLUDE from quantization.
+    skips: 
+    - embed             # Skip all initial embedding layers (word, text, and the AdaLN projection)
+    - transformer_proj_out # Skip the final output projection layer (the head)
+
+  # --- Input Activation Quantization Settings ---
+  ipts:
+    calib_range:
+      element_batch_size: 64
+      sample_batch_size: 16
+      element_size: 512
+      sample_size: -1
+    # We skip the same layers, but also add all normalization layers.
+    skips: 
+    - embed
+    - transformer_proj_out
+    - transformer_norm      # Skip the LayerNorms before Self-Attention and FFN
+    - transformer_add_norm  # Skip the LayerNorm before Cross-Attention
+
+  # --- Output Activation Quantization Settings ---
+  # We can leave this empty for now, as quantizing inputs is more common.
+  opts:
+    calib_range:
+      element_batch_size: 64
+      sample_batch_size: 16
+      element_size: 512
+      sample_size: -1
+  
+  # --- Smoothing Settings ---
+  smooth:
+    proj:
+      element_batch_size: -1
+      sample_batch_size: 16
+      element_size: -1
+      sample_size: -1
+    attn:
+      sample_batch_size: 16
+      sample_size: -1
+
