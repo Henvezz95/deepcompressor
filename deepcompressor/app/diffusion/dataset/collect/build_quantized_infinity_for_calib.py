@@ -3,9 +3,16 @@ import os, torch, gc
 from deepcompressor.app.diffusion.nn.struct_infinity import InfinityStruct, patchModel
 from evaluation.build_functions import assemble_model  # same import as in benchmark
 from Infinity_rep.tools.run_infinity import load_visual_tokenizer, load_tokenizer
-from deepcompressor.app.diffusion.dataset.collect.online_infinity_generation import load_transformer, args  # reuse your existing loader/args
+from deepcompressor.app.diffusion.dataset.collect.online_infinity_generation import load_transformer, args_2b, args_8b  # reuse your existing loader/args
 
-def load_quantized_model_for_calib(artifact_dir: str, ptq_config, use_fake_act=True, device="cuda"):
+def load_quantized_model_for_calib(model_type:str, artifact_dir: str, ptq_config, use_fake_act=True, device="cuda"):
+    if '2b' in model_type.lower():
+        args = args_2b
+    elif '8b' in model_type.lower():
+        args = args_8b
+    else:
+        raise NotImplementedError(f"Model Type not recognized: {model_type}")
+    
     # 1) base FP model + patch
     vae = load_visual_tokenizer(args)
     base = load_transformer(vae, args)

@@ -162,6 +162,7 @@ def main(config: DiffusionPtqRunConfig, unused_cfgs: dict, logging_level: int = 
 
         # Get quantized model (W4 or W4A depending on flag)
         patched_model = load_quantized_model_for_calib(
+            model_type="2b",
             artifact_dir=artifact_dir,
             ptq_config=config,
             use_fake_act=True,    # set False if you want W4-only calibration
