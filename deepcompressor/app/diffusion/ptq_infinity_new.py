@@ -8,7 +8,7 @@ import datasets
 from tqdm import tqdm
 
 sys.path.append('.') 
-sys.path.append('/workspace/deepcompressor/Infinity_rep/') 
+sys.path.append('../Infinity_rep/') 
 
 import torch
 import torch._dynamo
