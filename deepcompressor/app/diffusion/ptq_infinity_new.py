@@ -134,7 +134,9 @@ def ptq(  # noqa: C901
         torch.cuda.empty_cache()
 
     # region smooth quantization
-    if quant and config.enabled_smooth:
+    if 'enabled_smooth' not in other_configs:
+        unused_cfgs['enabled_smooth'] = config.enabled_smooth
+    if quant and unused_cfgs['enabled_smooth']:
         logger.info("* Smoothing model for quantization")
         tools.logging.Formatter.indent_inc()
         load_from = ""
@@ -162,10 +164,10 @@ def ptq(  # noqa: C901
             else:
                 logger.info(f"- Saving smooth scales to {save_path.smooth}")
                 torch.save(smooth_cache, save_path.smooth)
-        del smooth_cache
-        tools.logging.Formatter.indent_dec()
-        gc.collect()
-        torch.cuda.empty_cache()
+        #del smooth_cache
+        #tools.logging.Formatter.indent_dec()
+        #gc.collect()
+        #torch.cuda.empty_cache()
     # endregion
     # region collect original state dict
     if config.needs_acts_quantizer_cache:
@@ -213,15 +215,16 @@ def ptq(  # noqa: C901
             logger.info("- Generating weight settings")
         if not branch_load_from:
             logger.info("- Generating branch settings")
-        quantizer_state_dict, branch_state_dict, scale_state_dict = quantize_diffusion_weights(
-            model,
-            config,
-            configuration,
-            other_configs,
-            quantizer_state_dict=quantizer_state_dict,
-            branch_state_dict=branch_state_dict,
-            return_with_scale_state_dict=bool(save_dirpath),
-        )
+        with torch.amp.autocast("cuda", dtype=torch.float32):
+            quantizer_state_dict, branch_state_dict, scale_state_dict = quantize_diffusion_weights(
+                model,
+                config,
+                configuration,
+                other_configs,
+                quantizer_state_dict=quantizer_state_dict,
+                branch_state_dict=branch_state_dict,
+                return_with_scale_state_dict=bool(save_dirpath),
+            )
         if not quantizer_load_from and cache and cache.dirpath.wgts:
             logger.info(f"- Saving weight settings to {cache.path.wgts}")
             os.makedirs(cache.dirpath.wgts, exist_ok=True)
@@ -249,6 +252,7 @@ def ptq(  # noqa: C901
             logger.info(f"- Saving model to {save_dirpath}")
             torch.save(scale_state_dict, os.path.join(save_dirpath, "scale.pt"))
             torch.save(model.module.state_dict(), os.path.join(save_dirpath, "model.pt"))
+            #torch.save(model.module, os.path.join(save_dirpath, "golden_reference.pkl"))
         del quantizer_state_dict, branch_state_dict, scale_state_dict
         tools.logging.Formatter.indent_dec()
         gc.collect()
@@ -283,7 +287,6 @@ def ptq(  # noqa: C901
                 else:
                     logger.info(f"- Saving activation quantizer settings to {save_path.acts}")
                     torch.save(quantizer_state_dict, save_path.acts)
-            del quantizer_state_dict
         else:
             logger.info("- No need to generate/load activation quantizer settings")
             quantize_diffusion_activations(model, config, orig_state_dict=orig_state_dict)

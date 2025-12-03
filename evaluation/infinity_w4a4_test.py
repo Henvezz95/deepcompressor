@@ -4,9 +4,9 @@ import torch.nn.functional as F
 import sys
 import argparse 
 import cv2
-import copy
 import numpy as np
 import os
+import gc
 
 
 # --- Configure Python Path to Find Modules ---
@@ -109,7 +109,7 @@ def attach_kv_qparams(model, calib_pt_path, verbose=True):
 def main():
     print("--- Loading a real Infinity model from checkpoint ---")
     
-    
+    '''
     args = argparse.Namespace(
         pn='1M', model_path='/workspace/Infinity/weights/infinity_2b_reg.pth',
         vae_path='/workspace/Infinity/weights/infinity_vae_d32reg.pth',
@@ -135,7 +135,7 @@ def main():
         use_flex_attn=0, cache_dir='/dev/shm', checkpoint_type='torch_shard',
         bf16=1, save_file='tmp.jpg'
     )
-    '''
+    
 
     text_tokenizer, text_encoder = load_tokenizer(t5_path=args.text_encoder_ckpt)
     text_tokenizer_mem = torch.cuda.max_memory_allocated() / (1024**3)
@@ -149,7 +149,7 @@ def main():
     h_div_w_template_ = h_div_w_templates[np.argmin(np.abs(h_div_w_templates-h_div_w))]
     scale_schedule = dynamic_resolution_h_w[h_div_w_template_][args.pn]['scales']
     scale_schedule = [(1, h, w) for (_, h, w) in scale_schedule]
-    enable_kv_quant = True
+    enable_kv_quant = False
 
     torch.cuda.reset_peak_memory_stats()
     
@@ -196,8 +196,10 @@ def main():
                                                                           'text_proj_for_sos', 'text_proj_for_ca', 
                                                                           'lvl_embed', 'shared_ada_lin', 
                                                                           'head_nm', 'ca.mat_kv']) 
+    gc.collect()
     # 2) load artifacts
-    base_path = '../deepcompressor/runs/diffusion/int4_rank32_batch12/model/'
+    #base_path = '../deepcompressor/runs/diffusion/int4_rank32_batch12/model/'
+    base_path = '../deepcompressor/runs/diffusion/int4_rank32_8b/'
     arts = load_svdquant_artifacts(base_path)  # contains model.pt, scale.pt, branch.pt, smooth.pt
 
     # 3) load real weights into SVDQuantLinear only (fused MLPs are skipped)
@@ -218,7 +220,7 @@ def main():
             text_encoder,
             #'A photorealistic image of a dog working as a professor at MIT university ' \
             #'giving a lesson on Autoregressive Models for NLP',
-            'A racoon eating a corn cob',
+            'A photo of a happy dog',
             g_seed=16,
             gt_leak=0,
             gt_ls_Bl=None,

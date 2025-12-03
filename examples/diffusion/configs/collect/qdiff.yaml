@@ -2,4 +2,4 @@ collect:
   root: datasets
   dataset_name: qdiff
   data_path: prompts/qdiff.yaml
-  num_samples: 128
+  num_samples: 8

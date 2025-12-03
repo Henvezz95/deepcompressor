@@ -27,6 +27,7 @@ from evaluation.build_functions import assemble_model, attach_kv_qparams
 
 
 # --- Your Original Setup Code ---
+
 args = argparse.Namespace(
     pn='1M', model_path='./Infinity_rep/weights/infinity_2b_reg.pth',
     vae_path='./Infinity_rep/weights/infinity_vae_d32reg.pth',
@@ -39,6 +40,20 @@ args = argparse.Namespace(
     checkpoint_type='torch', seed=0, bf16=0, save_file='tmp.jpg',
     enable_model_cache=0
 )
+'''
+args=argparse.Namespace(
+    pn='1M', model_path='./Infinity_rep/weights/infinity_8b_weights',
+    vae_path='./Infinity_rep/weights/infinity_vae_d56_f8_14_patchify.pth',
+    text_encoder_ckpt='./Infinity_rep/weights/flan-t5-xl',
+    cfg_insertion_layer=0, vae_type=14, add_lvl_embeding_only_first_block=1,
+    use_bit_label=1, model_type='infinity_8b', rope2d_each_sa_layer=1,
+    rope2d_normalized_by_hw=2, use_scale_schedule_embedding=0, sampling_per_bits=1,
+    text_channels=2048, apply_spatial_patchify=1, h_div_w_template=1.000,
+    use_flex_attn=0, cache_dir='/dev/shm', checkpoint_type='torch_shard',
+    bf16=1, save_file='tmp.jpg'
+)
+'''
+
 enable_kv_quant = True
 
 # You will need your quantization config to initialize the activation quantizers
@@ -65,13 +80,17 @@ print("Patching complete.\n")
 
 # 1. Load all three necessary files
 print("--- Loading weights, smoothing scales, and low-rank branches ---")
-base_path = 'runs/diffusion/int4_rank32_batch12/model/' 
+#base_path = 'runs/diffusion/int4_rank32_batch12/model/'
+base_path = 'runs/diffusion/int4_rank32_naive_2b/'
+if os.path.isfile(os.path.join(base_path, 'smooth.pt')):
+    smooth_scales = torch.load(os.path.join(base_path, 'smooth.pt'))
+else: 
+    smooth_scales = {}
+if os.path.isfile(os.path.join(base_path, 'branch.pt')):
+    branch_state_dict = torch.load(os.path.join(base_path, 'branch.pt'))
+else: 
+    branch_state_dict = {}
 weights = torch.load(os.path.join(base_path, 'model.pt'))
-smooth_scales = torch.load(os.path.join(base_path, 'smooth.pt'))
-branch_state_dict = torch.load(os.path.join(base_path, 'branch.pt'))
-
-# Load the final weights into the model
-quantized_model.load_state_dict(weights)
 
 # Create a struct to easily iterate through the model
 model_struct = InfinityStruct.construct(quantized_model)
@@ -84,13 +103,13 @@ generation_args = { 'cfg_list': [3.0]*13, 'tau_list': [0.5]*13, 'g_seed': 16,
                     'sampling_per_bits': args.sampling_per_bits, 'enable_positive_prompt': True }
 
 
-model_struct = assemble_model(model_struct, 
-                              ptq_config, 
-                              branch_state_dict, 
-                              smooth_scales, 
-                              weights, 
-                              quantize_activations = False,
-                              skip_ca_kv_act = False)
+model_struct = assemble_model(model_struct,
+                              ptq_config,
+                              branch_state_dict,
+                              smooth_scales,
+                              weights,
+                              quantize_activations = True,
+                              skip_ca_kv_act = True)
 
 if enable_kv_quant:
     attach_kv_qparams(quantized_model, os.path.join('runs/', "kv_scales", "kv_quant_calib.pt"))
@@ -106,7 +125,7 @@ img = gen_one_img(
     vae,
     text_tokenizer,
     text_encoder,
-    'A photo of a happy dog',
+    'A photo of a happy dog with a space suit',
     g_seed=16,
     gt_leak=0,
     gt_ls_Bl=None,
@@ -119,6 +138,6 @@ img = gen_one_img(
     enable_positive_prompt=True,
 )
 
-file_name = 'img_patched_quantized_w4a16_kv8.jpg'
+file_name = 'img_patched_quantized_w4a4_naive_kv8.jpg'
 cv2.imwrite(file_name, img.detach().cpu().numpy())
 print(f"Generated test image: {file_name}")

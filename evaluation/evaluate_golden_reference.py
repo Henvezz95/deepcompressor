@@ -26,6 +26,8 @@ from Infinity_rep.infinity.utils.dynamic_resolution import dynamic_resolution_h_
 from deepcompressor.nn.patch.lowrank import LowRankBranch # Make sure to import this
 # --- WARNING: This script is for debugging only. Loading pickled models is not recommended for production. ---
 
+from evaluation.build_functions import assemble_model, attach_kv_qparams
+
 
 # Setup arguments (keep your existing args setup)
 args = argparse.Namespace(
@@ -69,7 +71,9 @@ except Exception as e:
 
 model_struct = DiTStruct.construct(quantized_model)
 
+#attach_kv_qparams(quantized_model, os.path.join('runs/', "kv_scales", "kv_quant_calib.pt"))
 
+'''
 for module_key, module_name, module, _, _ in model_struct.named_key_modules():
     # Check if this layer should have its activations quantized
     if config.ipts.is_enabled_for(module_key):
@@ -79,13 +83,14 @@ for module_key, module_name, module, _, _ in model_struct.named_key_modules():
         # The crucial fix:
         quantizer.input_packager = SimpleInputPackager()
         quantizer.as_hook().register(module)
-
+'''
 
 print("✅ Activation hooks are now truly active.")
 
-prompt = 'A very fast fighter jet'
+prompt = 'A photo of a happy dog'
 save_name = "_".join(prompt.split(' '))
 
+'''
 # Reference Image
 img = gen_one_img(
     model,
@@ -106,7 +111,7 @@ img = gen_one_img(
 )
 cv2.imwrite(f'{save_name}_FP16.jpg', img.detach().cpu().numpy())
 print(f"Generated test image: {save_name}_FP16.jpg")
-
+'''
 # Now the quantized_model is fully assembled and ready for testing
 img = gen_one_img(
     quantized_model,
@@ -125,8 +130,8 @@ img = gen_one_img(
     sampling_per_bits=args.sampling_per_bits,
     enable_positive_prompt=False,
 )
-cv2.imwrite(f'{save_name}_W4A4.jpg', img.detach().cpu().numpy())
-print(f"Generated test image: {save_name}_W4A4.jpg")
+cv2.imwrite(f'{save_name}_W4A16.jpg', img.detach().cpu().numpy())
+print(f"Generated test image: {save_name}_W4A16.jpg")
 
 # Assumiamo che 'golden_model' sia il modello in memoria alla fine di ptq.py
 # e 'test_model' sia quello che carichi da disco nel tuo script di test.

@@ -45,7 +45,7 @@ def smooth_infinity_model(
     """
     print("--- Starting Infinity-Aware Smoothing Process ---")
     config = config_loader.quant
-    smooth_cache = smooth_cache or {}
+
     '''
     if config.smooth.enabled_proj:
         if smooth_cache:
@@ -232,3 +232,4 @@ def smooth_attention_block(
                         ffn=block.add_ffn_struct, config=config, smooth_cache=smooth_cache, block_cache=layer_cache
                     )
                 tools.logging.Formatter.indent_dec()
+                torch.save(smooth_cache, 'smooth.pt')

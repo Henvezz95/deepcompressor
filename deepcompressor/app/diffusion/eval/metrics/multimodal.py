@@ -25,6 +25,10 @@ class PromptImageDataset(data.Dataset):
     def __getitem__(self, idx: int):
         row = self.ref_dataset[idx]
         gen_image = Image.open(os.path.join(self.gen_dirpath, row["filename"] + ".png")).convert("RGB")
+
+        # --- ADD THIS LINE FOR DEBUGGING ---
+        print(f"CLIP Score is loading: {os.path.join(self.gen_dirpath, row['filename'] + '.png')}")
+        
         gen_tensor = torch.from_numpy(np.array(gen_image)).permute(2, 0, 1)
         prompt = row["prompt"]
         return [gen_tensor, prompt]

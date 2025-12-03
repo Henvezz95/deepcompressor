@@ -47,6 +47,16 @@ config = configs.quant
 layer_name = "block_chunks.0.module.0.ffn.fc2"
 target_golden_layer = golden_model.get_submodule(layer_name)
 
+# Print Hooks
+hooks = list(target_golden_layer._forward_pre_hooks.values())
+print(hooks[0].processor.smooth_scale)
+print(hooks[1].branch.a.weight)
+print(smooth_scales[layer_name])
+print(branch_state_dict[layer_name]['a.weight'].cpu())
+print(torch.allclose(hooks[0].processor.smooth_scale.cpu(), smooth_scales[layer_name], atol=1e-3))
+print(torch.allclose(hooks[1].branch.a.weight.cpu(), branch_state_dict[layer_name]['a.weight'].cpu(), atol=1e-3))
+print(torch.allclose(hooks[1].branch.b.weight.cpu(), branch_state_dict[layer_name]['b.weight'].cpu(), atol=1e-3))
+
 
 # 3. Create the "white box" reconstructed layer
 print(f"--- Reconstructing a manual version of '{layer_name}' ---")

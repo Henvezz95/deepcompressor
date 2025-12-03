@@ -8,15 +8,15 @@ eval:
   protocol: flowdpm{num_steps}-g{guidance_scale}
 quant:
   calib:
-    batch_size: 256
+    batch_size: 1   # <-- Reduced from 256
   wgts:
     calib_range:
       element_batch_size: 64
-      sample_batch_size: 32
+      sample_batch_size: 1  # <-- Reduced from 32
       element_size: 512
       sample_size: -1
     low_rank:
-      sample_batch_size: 32
+      sample_batch_size: 1  # <-- Reduced from 32
       sample_size: -1
     skips: 
     - embed
@@ -33,7 +33,7 @@ quant:
   ipts:
     calib_range:
       element_batch_size: 64
-      sample_batch_size: 32
+      sample_batch_size: 1  # <-- Reduced from 32
       element_size: 512
       sample_size: -1
     skips: 
@@ -57,9 +57,9 @@ quant:
   smooth:
     proj:
       element_batch_size: -1
-      sample_batch_size: 32
+      sample_batch_size: 1  # <-- Reduced from 32
       element_size: -1
       sample_size: -1
     attn:
-      sample_batch_size: 32
+      sample_batch_size: 1  # <-- Reduced from 32
       sample_size: -1

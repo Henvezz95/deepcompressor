@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import cv2
 
 import sys
-sys.path.append('../Infinity_rep/')
+sys.path.append('./Infinity_rep/')
 
 import datasets
 import torch
@@ -566,8 +566,8 @@ def get_stateful_cache(model: Infinity, config: DiffusionPtqRunConfig, pipeline_
     all_final_entries = [] 
 
     # --- Loop through prompts and run generation ---
-    #schedule = {si: (64 if si < 4 else 2) for si in range(len(scale_schedule))}
-    schedule = {si: (64 if si < 4 else 1) for si in range(len(scale_schedule))}
+    #schedule = {si: (64 if si < 10 else 32) for si in range(len(scale_schedule))}
+    schedule = {si: (32 if si < 10 else 16) for si in range(len(scale_schedule))}
 
     # Apply it to the model
     model.set_capture_schedule(schedule)

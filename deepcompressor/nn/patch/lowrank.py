@@ -67,6 +67,7 @@ class LowRankBranch(nn.Module):
             return self.b.weight @ self.a.weight
 
     def forward(self, input: torch.Tensor) -> torch.Tensor | None:
+        #print('RUNNING THE HOOK!')
         if self.a is None:
             return None
         else:

@@ -1,0 +1,26 @@
+quant:
+  wgts:
+    dtype: sint8
+    # Use -1 to indicate "entire dimension", effectively Per-Channel if shape matches
+    # Usually: [1, -1, 1, 1] implies scaling along the output channel 
+    group_shapes: 
+    - - 1
+      - -1  # <--- Change 64 to -1 for Per-Channel
+      - 1
+      - 1
+      - 1
+    scale_dtypes:
+    - null
+  ipts:
+    static: false # Dynamic quantization (Per-Token)
+    dtype: sint8
+    # For activations, -1 usually means Per-Token (scaling row-wise)
+    group_shapes:
+    - - 1
+      - -1 
+      - 1
+      - 1
+      - 1
+    scale_dtypes:
+    - null
+    allow_unsigned: false # usually signed int8 is safer

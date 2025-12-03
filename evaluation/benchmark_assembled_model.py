@@ -28,9 +28,9 @@ from Infinity_rep.infinity.utils.dynamic_resolution import dynamic_resolution_h_
 from deepcompressor.nn.patch.lowrank import LowRankBranch 
 from PIL import Image
 
-from build_functions import assemble_model
+from evaluation.build_functions import assemble_model, attach_kv_qparams
 
-os.environ['TORCH_HOME'] = '/workspace/torch_cache' 
+#os.environ['TORCH_HOME'] = '/workspace/torch_cache' 
 
 class InfinityPipelineWrapper:
     def __init__(self, model, vae, tokenizer, text_encoder, generation_args):
@@ -89,6 +89,20 @@ args = argparse.Namespace(
     checkpoint_type='torch', seed=0, bf16=1, save_file='tmp.jpg',
     enable_model_cache=0
 )
+'''
+
+args=argparse.Namespace(
+    pn='1M', model_path='/workspace/deepcompressor/Infinity_rep/weights/infinity_8b_weights',
+    vae_path='/workspace/Infinity/weights/infinity_vae_d56_f8_14_patchify.pth',
+    text_encoder_ckpt='/workspace/Infinity/weights/flan-t5-xl',
+    cfg_insertion_layer=0, vae_type=14, add_lvl_embeding_only_first_block=1,
+    use_bit_label=1, model_type='infinity_8b', rope2d_each_sa_layer=1,
+    rope2d_normalized_by_hw=2, use_scale_schedule_embedding=0, sampling_per_bits=1,
+    text_channels=2048, apply_spatial_patchify=1, h_div_w_template=1.000,
+    use_flex_attn=0, cache_dir='/dev/shm', checkpoint_type='torch_shard',
+    bf16=1, save_file='tmp.jpg'
+)
+'''
 
 logger = tools.logging.getLogger(__name__)
 ptq_config, _, unused_cfgs, unused_args, unknown_args = DiffusionPtqRunConfig.get_parser().parse_known_args()
@@ -109,6 +123,8 @@ h_div_w_template_ = h_div_w_templates[np.argmin(np.abs(h_div_w_templates-h_div_w
 scale_schedule = dynamic_resolution_h_w[h_div_w_template_][args.pn]['scales']
 scale_schedule = [(1, h, w) for (_, h, w) in scale_schedule]
 
+enable_kv_quant = True
+
 print("--- Patching attention layers to be compatible ---")
 quantized_model = patchModel(model)
 print("Patching complete.\n")
@@ -119,7 +135,11 @@ print("--- Loading inference artifacts (model.pt, branch.pt) ---")
 dtype = torch.bfloat16
 base_path = 'runs/diffusion/int4_rank32_batch12/model/' 
 weights = torch.load(os.path.join(base_path, 'model.pt'))
-smooth_scales = torch.load(os.path.join(base_path, 'smooth.pt'))
+try:
+    smooth_scales = torch.load(os.path.join(base_path, 'smooth.pt'))
+except:
+    smooth_scales = {}
+    print('No Smoothing applied')
 branch_state_dict = torch.load(os.path.join(base_path, 'branch.pt'))
 
 # 2. Crete the model Structure
@@ -136,7 +156,16 @@ generation_args = { 'cfg_list': [3.0]*13, 'tau_list': [0.5]*13, 'g_seed': 16,
 #test_args = generation_args.copy()
 #test_args['g_seed'] = 42
 #img1 = gen_one_img(model, vae, text_tokenizer, text_encoder, test_prompt, **test_args).cpu().detach().numpy()
-model_struct = assemble_model(model_struct, ptq_config, branch_state_dict, smooth_scales, weights, True)
+model_struct = assemble_model(model_struct = model_struct, 
+                              configs = ptq_config, 
+                              branch_state_dict = branch_state_dict, 
+                              smooth_scales = smooth_scales, 
+                              weights = weights, 
+                              quantize_activations = True, 
+                              skip_ca_kv_act = True)
+
+if enable_kv_quant:
+    attach_kv_qparams(quantized_model, os.path.join('runs/', "kv_scales", "kv_quant_calib.pt"))
 
 del weights
 del branch_state_dict
