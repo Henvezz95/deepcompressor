@@ -14,21 +14,19 @@ eval:
   num_samples: 128
   protocol: autoregressive-s{num_steps}-g{guidance_scale}
   batch_size: 1
-  gen_root: './evaluation_output/infinity_w8a8' # New folder for this experiment's results
+  gen_root: './evaluation_output/infinity_w8a8_smooth' # New folder for this experiment's results
   ref_root: ''
 
+enabled_smooth: true
+enabled_low_rank: false
 
 quant:
   # Calibration settings - good defaults to start with
   calib:
     batch_size: 8
-  smooth:
-    enabled_smooth: true
 
   # --- Weight Quantization Settings ---
   wgts:
-    enabled_low_rank: false
-    
     calib_range:
       element_batch_size: 64
       sample_batch_size: 16
@@ -67,13 +65,13 @@ quant:
       sample_size: -1
   
   # --- Smoothing Settings ---
-  smooth:
-    proj:
-      element_batch_size: -1
-      sample_batch_size: 16
-      element_size: -1
-      sample_size: -1
-    attn:
-      sample_batch_size: 16
-      sample_size: -1
+  #smooth:
+  #  proj:
+  #    element_batch_size: -1
+  #    sample_batch_size: 16
+  #    element_size: -1
+  #    sample_size: -1
+  #  attn:
+  #    sample_batch_size: 16
+  #    sample_size: -1
 
