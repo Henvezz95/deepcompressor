@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from deepcompressor.app.diffusion.config import DiffusionPtqRunConfig
 from deepcompressor.utils.common import hash_str_to_int, tree_map, tree_split
-from infinity.models.infinity import Infinity 
+from infinity.models.infinity import Infinity
 from Infinity_rep.tools.run_infinity import *
 
 from deepcompressor.app.diffusion.dataset.data import get_dataset
@@ -32,10 +32,10 @@ import functools
 import argparse
 import gc
 
-model_path = '/workspace/Infinity/weights/infinity_2b_reg.pth'
-vae_path = '/workspace/Infinity/weights/infinity_vae_d32reg.pth'
-text_encoder_ckpt = '/workspace/Infinity/weights/flan-t5-xl'
-h_div_w = 1/1 
+model_path = './Infinity_rep/weights/infinity_2b_reg.pth'
+vae_path = './Infinity_rep/weights/infinity_vae_d32reg.pth'
+text_encoder_ckpt = './Infinity_rep/weights/flan-t5-xl'
+h_div_w = 1/1
 enable_positive_prompt = 0
 
 args_2b = argparse.Namespace(
@@ -63,10 +63,11 @@ args_2b = argparse.Namespace(
     save_file='tmp.jpg',
     enable_model_cache=0
 )
+
 args_8b=argparse.Namespace(
-    pn='1M', model_path='/workspace/deepcompressor/Infinity_rep/weights/infinity_8b_weights',
-    vae_path='/workspace/Infinity/weights/infinity_vae_d56_f8_14_patchify.pth',
-    text_encoder_ckpt='/workspace/Infinity/weights/flan-t5-xl',
+    pn='1M', model_path='./Infinity_rep/weights/infinity_8b_weights',
+    vae_path='./Infinity_rep/weights/infinity_vae_d56_f8_14_patchify.pth',
+    text_encoder_ckpt='./Infinity_rep/weights/flan-t5-xl',
     cfg_insertion_layer=0, vae_type=14, add_lvl_embeding_only_first_block=1,
     use_bit_label=1, model_type='infinity_8b', rope2d_each_sa_layer=1,
     rope2d_normalized_by_hw=2, use_scale_schedule_embedding=0, sampling_per_bits=1,
@@ -162,19 +163,19 @@ class StatefulInfinity(Infinity):
         inference_mode=False,
         save_img_path=None,
         sampling_per_bits=1,
-    ):   
+    ):
         if g_seed is None: rng = None
         else: self.rng.manual_seed(g_seed); rng = self.rng
         assert len(cfg_list) >= len(scale_schedule)
         assert len(tau_list) >= len(scale_schedule)
 
-        # scale_schedule is used by infinity, vae_scale_schedule is used by vae if there exists a spatial patchify, 
+        # scale_schedule is used by infinity, vae_scale_schedule is used by vae if there exists a spatial patchify,
         # we need to convert scale_schedule to vae_scale_schedule by multiply 2 to h and w
         if self.apply_spatial_patchify:
             vae_scale_schedule = [(pt, 2*ph, 2*pw) for pt, ph, pw in scale_schedule]
         else:
             vae_scale_schedule = scale_schedule
-        
+
         kv_compact, lens, cu_seqlens_k, max_seqlen_k = label_B_or_BLT
         if any(np.array(cfg_list) != 1):
             bs = 2*B
@@ -212,7 +213,7 @@ class StatefulInfinity(Infinity):
             for block_chunk_ in self.block_chunks:
                 for module in block_chunk_.module.module:
                     (module.sa if isinstance(module, CrossAttnBlock) else module.attn).kv_caching(True)
-        
+
         abs_cfg_insertion_layers = []
         add_cfg_on_logits, add_cfg_on_probs = False, False
         leng = len(self.unregistered_blocks)
@@ -226,7 +227,7 @@ class StatefulInfinity(Infinity):
                 abs_cfg_insertion_layers.append(leng+item)
             else:
                 raise ValueError(f'cfg_insertion_layer: {item} is not valid')
-        
+
         num_stages_minus_1 = len(scale_schedule)-1
         summed_codes = 0
         for si, pn in enumerate(scale_schedule):   # si: i-th segment
@@ -247,9 +248,9 @@ class StatefulInfinity(Infinity):
                 # last_stage shape: [4, 1, 2048], cond_BD_or_gss.shape: [4, 1, 6, 2048], ca_kv[0].shape: [64, 2048], ca_kv[1].shape [5], ca_kv[2]: int
                 if self.add_lvl_embeding_only_first_block and block_idx == 0:
                     last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
-                if not self.add_lvl_embeding_only_first_block: 
+                if not self.add_lvl_embeding_only_first_block:
                     last_stage = self.add_lvl_embeding(last_stage, si, scale_schedule, need_to_pad=need_to_pad)
-                
+
                 for m_idx, m in enumerate(b.module):
                     if m_idx == self.module_index and block_idx == self.block_index:
                         # Dictionary to store the inputs for the current module pass
@@ -260,13 +261,13 @@ class StatefulInfinity(Infinity):
                         # --- Capture the contextual kwargs needed for evaluation ---
                         # The cross-attention context is available in this scope
                         eval_kwargs_for_this_step = {'ca_kv': ca_kv}
-                        
+
                         # The self-attention KV cache is stored inside the module.
                         # We capture its state BEFORE it's updated with the current step's data.
                         # The PatchedSelfAttention forward pass is designed to accept this structure.
                         sa_cache_k = m.sa.cached_k
                         sa_cache_v = m.sa.cached_v
-                        
+
                         # We use clone().detach() to prevent any modifications to the saved cache
                         eval_kwargs_for_this_step['sa_kv_cache'] = {
                             'sa': {
@@ -281,14 +282,14 @@ class StatefulInfinity(Infinity):
 
                         # Store this kwargs dictionary in our main data package
                         calibration_data['eval_kwargs'] = eval_kwargs_for_this_step
-                        
+
                         # Define the generic hook function to capture the input tensor
                         def get_input_hook(name):
                             def hook(model, input, output):
                                 # Input to a nn.Linear module is a tuple. We capture the first element.
                                 calibration_data[name] = input[0].detach()
                             return hook
-                        
+
                         # Attach hooks to the PatchedSelfAttention linear layers
                         handles.append(m.sa.to_q.register_forward_hook(get_input_hook('sa_q')))
                         handles.append(m.sa.to_k.register_forward_hook(get_input_hook('sa_k')))
@@ -300,7 +301,7 @@ class StatefulInfinity(Infinity):
                         handles.append(m.ca.to_k.register_forward_hook(get_input_hook('ca_k')))
                         handles.append(m.ca.to_v.register_forward_hook(get_input_hook('ca_v')))
                         handles.append(m.ca.to_out[0].register_forward_hook(get_input_hook('ca_out')))
-                        
+
                         # Attach hooks to the FFN linear layers
                         if hasattr(m.ffn, 'fcg'):  # For FFNSwiGLU
                             handles.append(m.ffn.fcg.register_forward_hook(get_input_hook('ffn_fcg')))
@@ -318,7 +319,7 @@ class StatefulInfinity(Infinity):
                         last_stage = cfg * last_stage[:B] + (1-cfg) * last_stage[B:]
                         last_stage = torch.cat((last_stage, last_stage), 0)
                     layer_idx += 1
-                    
+
                     if m_idx == self.module_index and block_idx == self.block_index:
                         # The forward pass of module 'm' has just run, triggering the hooks.
                         # Now, save the collected data and clean up.
@@ -338,14 +339,14 @@ class StatefulInfinity(Infinity):
                         # Remove all the hooks to prevent them from firing again
                         for handle in handles:
                             handle.remove()
-            
+
             if (cfg != 1) and add_cfg_on_logits:
                 # print(f'add cfg on add_cfg_on_logits')
                 logits_BlV = self.get_logits(last_stage, cond_BD).mul(1/tau_list[si])
                 logits_BlV = cfg * logits_BlV[:B] + (1-cfg) * logits_BlV[B:]
             else:
                 logits_BlV = self.get_logits(last_stage[:B], cond_BD[:B]).mul(1/tau_list[si])
-            
+
             if self.use_bit_label:
                 tmp_bs, tmp_seq_len = logits_BlV.shape[:2]
                 logits_BlV = logits_BlV.reshape(tmp_bs, -1, 2)
@@ -389,7 +390,7 @@ class StatefulInfinity(Infinity):
                 idx_Bl_list.append(idx_Bl)
                 if si != num_stages_minus_1:
                     accu_BChw, last_stage = self.quant_only_used_in_inference[0].one_step_fuse(si, num_stages_minus_1+1, accu_BChw, h_BChw, scale_schedule)
-            
+
             if si != num_stages_minus_1:
                 last_stage = self.word_embed(self.norm0_ve(last_stage))
                 last_stage = last_stage.repeat(bs//B, 1, 1)
@@ -404,7 +405,7 @@ class StatefulInfinity(Infinity):
 
         if not ret_img:
             return ret, idx_Bl_list, []
-        
+
         if vae_type != 0:
             img = vae.decode(summed_codes.squeeze(-3))
         else:
@@ -413,20 +414,20 @@ class StatefulInfinity(Infinity):
         img = (img + 1) / 2
         img = img.permute(0, 2, 3, 1).mul_(255).to(torch.uint8).flip(dims=(3,))
         return ret, idx_Bl_list, img
-    
+
 
 
 def load_infinity(
-    rope2d_each_sa_layer, 
-    rope2d_normalized_by_hw, 
-    use_scale_schedule_embedding, 
-    pn, 
-    use_bit_label, 
-    add_lvl_embeding_only_first_block, 
-    model_path='', 
-    scale_schedule=None, 
-    vae=None, 
-    device='cuda', 
+    rope2d_each_sa_layer,
+    rope2d_normalized_by_hw,
+    use_scale_schedule_embedding,
+    pn,
+    use_bit_label,
+    add_lvl_embeding_only_first_block,
+    model_path='',
+    scale_schedule=None,
+    vae=None,
+    device='cuda',
     model_kwargs=None,
     text_channels=2048,
     apply_spatial_patchify=0,
@@ -480,7 +481,7 @@ def load_infinity(
 def load_transformer(vae, args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model_path = args.model_path
-    if args.checkpoint_type == 'torch': 
+    if args.checkpoint_type == 'torch':
         # copy large model to local; save slim to local; and copy slim to nas; load local slim model
         if osp.exists(args.cache_dir):
             local_model_path = osp.join(args.cache_dir, 'tmp', model_path.replace('/', '_'))
@@ -530,16 +531,16 @@ def load_transformer(vae, args):
     elif args.model_type == 'infinity_layer48':
         kwargs_model = dict(depth=48, embed_dim=3360, num_heads=28, drop_path_rate=0.1, mlp_ratio=4, block_chunks=4)
     infinity = load_infinity(
-        rope2d_each_sa_layer=args.rope2d_each_sa_layer, 
+        rope2d_each_sa_layer=args.rope2d_each_sa_layer,
         rope2d_normalized_by_hw=args.rope2d_normalized_by_hw,
         use_scale_schedule_embedding=args.use_scale_schedule_embedding,
         pn=args.pn,
-        use_bit_label=args.use_bit_label, 
-        add_lvl_embeding_only_first_block=args.add_lvl_embeding_only_first_block, 
-        model_path=slim_model_path, 
-        scale_schedule=None, 
-        vae=vae, 
-        device=device, 
+        use_bit_label=args.use_bit_label,
+        add_lvl_embeding_only_first_block=args.add_lvl_embeding_only_first_block,
+        model_path=slim_model_path,
+        scale_schedule=None,
+        vae=vae,
+        device=device,
         model_kwargs=kwargs_model,
         text_channels=args.text_channels,
         apply_spatial_patchify=args.apply_spatial_patchify,
@@ -549,35 +550,72 @@ def load_transformer(vae, args):
     )
     return infinity
 
+# --- GLOBAL CACHE TO PREVENT OOM ---
+_CACHED_TOKENIZER = None
+_CACHED_TEXT_ENCODER = None
+_CACHED_VAE = None
 
-def get_stateful_cache(model: Infinity, config: DiffusionPtqRunConfig, pipeline_config: dict, 
+def clear_model_kv_cache(model):
+    """
+    Forcibly wipes the KV cache from every module in the model.
+    The standard reset_cache() might miss the 'patched' layers from DeepCompressor.
+    """
+    for name, module in model.named_modules():
+        # Clear standard Infinity cache
+        if hasattr(module, 'cached_k'): module.cached_k = None
+        if hasattr(module, 'cached_v'): module.cached_v = None
+
+        # Clear Patched Layer cache (DeepCompressor specific)
+        if hasattr(module, 'sa'):
+            if hasattr(module.sa, 'cached_k'): module.sa.cached_k = None
+            if hasattr(module.sa, 'cached_v'): module.sa.cached_v = None
+
+    torch.cuda.empty_cache()
+
+def get_stateful_cache(model: Infinity, config: DiffusionPtqRunConfig, pipeline_config: dict,
                        dataset: datasets.Dataset, block_idx: int, module_idx: int, save_kv_cache_only: bool = False, save_imgs: bool = False):
+
+    # 1. Force Clear Cache BEFORE starting
+    clear_model_kv_cache(model)
     model.set_block(block_idx, module_idx)
+
     if config.pipeline.name == 'infinity_2b':
         args = args_2b
     elif config.pipeline.name == 'infinity_8b':
         args = args_8b
     else:
         raise NotImplementedError(f"Pipeline {config.pipeline.name} not implemented")
-    vae = load_visual_tokenizer(args)
-    text_tokenizer, text_encoder = load_tokenizer(t5_path=args.text_encoder_ckpt)
+
+    # --- MEMORY LEAK FIX: GLOBAL CACHING ---
+    global _CACHED_TOKENIZER, _CACHED_TEXT_ENCODER, _CACHED_VAE
+
+    if _CACHED_TOKENIZER is None or _CACHED_TEXT_ENCODER is None:
+        print(" [Cache] Loading Tokenizer and Text Encoder (Global)...")
+        _CACHED_TOKENIZER, _CACHED_TEXT_ENCODER = load_tokenizer(t5_path=args.text_encoder_ckpt)
+    text_tokenizer = _CACHED_TOKENIZER
+    text_encoder = _CACHED_TEXT_ENCODER
+
+    if _CACHED_VAE is None:
+        print(" [Cache] Loading VAE (Global)...")
+        _CACHED_VAE = load_visual_tokenizer(args)
+    vae = _CACHED_VAE
+    # ---------------------------------------
+
     print(f"In total {len(dataset)} samples")
 
-    all_final_entries = [] 
+    # Accumulators for results
+    all_final_entries = [] # For KV cache mode
+    total_collected_cache = [] # For Calibration/Smoothing mode
 
-    # --- Loop through prompts and run generation ---
-    #schedule = {si: (64 if si < 10 else 32) for si in range(len(scale_schedule))}
-    schedule = {si: (32 if si < 10 else 16) for si in range(len(scale_schedule))}
-
-    # Apply it to the model
+    # --- Loop through prompts ---
+    schedule = {si: (3 if si < 5 else 3) for si in range(len(scale_schedule))}
     model.set_capture_schedule(schedule)
-    
+
     for batch in tqdm(dataset.iter(batch_size=1), desc="Generating and Collecting Data"):
         prompt = batch["prompt"][0]
         filename = batch["filename"][0]
 
         with torch.no_grad():
-            # Pass the calibration-enabled model to your generation function
             generated_image = gen_one_img(
                 model, vae, text_tokenizer, text_encoder, prompt,
                 g_seed=hash_str_to_int(filename),
@@ -589,8 +627,10 @@ def get_stateful_cache(model: Infinity, config: DiffusionPtqRunConfig, pipeline_
                 sampling_per_bits=args.sampling_per_bits,
                 enable_positive_prompt=0
             )
+
+        # --- DATA EXTRACTION ---
         if save_kv_cache_only:
-            # keep ONLY the final KV cache for this generation
+            # Extract final KV only
             final_entry = None
             for d in reversed(model.collected_cache):
                 ek = d.get("eval_kwargs", {})
@@ -602,29 +642,43 @@ def get_stateful_cache(model: Infinity, config: DiffusionPtqRunConfig, pipeline_
                         "sa_v_final": sa.get("v").detach() if torch.is_tensor(sa.get("v")) else None,
                     }
                     break
-
             if final_entry is not None:
                 all_final_entries.append(final_entry)
+        else:
+            # === FIX FOR "Inputs must be provided" ERROR ===
+            # We must save the captured calibration data before clearing the model cache.
+            # IMPORTANT: Move to CPU to prevent OOM, as we accumulate data from multiple images.
+            for item in model.collected_cache:
+                cpu_item = {}
+                for k, v in item.items():
+                    if isinstance(v, torch.Tensor):
+                        cpu_item[k] = v.detach().cpu() # Move to CPU
+                    elif isinstance(v, dict):
+                        # Handle nested dicts (like eval_kwargs) recursively if needed,
+                        # or just shallow copy if they don't contain massive GPU tensors at top level
+                        # For safety, let's assume eval_kwargs might have tensors
+                        cpu_item[k] = v
+                    else:
+                        cpu_item[k] = v
+                total_collected_cache.append(cpu_item)
 
-            # clear per-step scratch from the model for the next image
-            model.collected_cache.clear()
-            torch.cuda.empty_cache(); gc.collect()
+        # --- CLEANUP PER IMAGE ---
+        model.collected_cache.clear() # Now safe to clear because we copied to total_collected_cache
+        del generated_image
+        clear_model_kv_cache(model)
+        gc.collect()
 
-
-        if save_imgs:
-            os.makedirs('./temp_imgs', exist_ok=True)
-            cv2.imwrite(f'./temp_imgs/temp_{str(time.time())}.png', generated_image.detach().cpu().numpy())
-
-    result = model.collected_cache
+    # DETACH AND RETURN
     model.collected_cache = []
-    model.reset_cache()
-    if save_kv_cache_only:
-        result = all_final_entries
-    return result
 
+    if save_kv_cache_only:
+        return all_final_entries
+
+    # Return the accumulated CPU data
+    return total_collected_cache
 
 if __name__ == "__main__":
-    from deepcompressor.app.diffusion.nn.struct_infinity import patchModel 
+    from deepcompressor.app.diffusion.nn.struct_infinity import patchModel
 
     parser = DiffusionPtqRunConfig.get_parser()
     parser.add_config(CollectConfig, scope="collect", prefix="collect")
