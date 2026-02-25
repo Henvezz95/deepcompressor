@@ -17,4 +17,4 @@
 </p>
 
 
-This is a fork of the Deepcompressor repository. Instructions on how to run the tests are coming soon.
+This is a fork of the Deepcompressor repository that also support Infinity VAR models. Instructions on how to run the tests are coming soon. Contact the authors to get the trained models.
