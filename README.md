@@ -126,6 +126,24 @@ python -m evaluation.benchmark_assembled_model \
 
 **Note on Artifacts:** The script automatically looks for cache scales in `runs/kv_scales/kv_quant_calib.pt`. Ensure you have run the `calibrate_cache_quantization` script before enabling the `--enable_kv_quant` flag.
 
+### Usage
+
+The real-quantization benchmark now follows the same configuration hierarchy as the rest of the **VAR-Compressor** pipeline. You must provide the model YAML file and the path to your PTQ artifacts:
+
+```bash
+# Benchmark the 8B model with real W4A4 + KV8 kernels
+python infinity_w4a4_test.py configs/models/infinity-8b.yaml \
+    --base-path ./runs/diffusion/int4_rank32_8b/ \
+    --enable_kv_quant true \
+    --prompt "A cinematic photo of a robot in Zurich"
+```
+
+**Custom Arguments:**
+* `--base-path`: (Required) The directory containing your `model.pt`, `smooth.pt`, and `branch.pt` artifacts.
+* `--enable_kv_quant`: Set to `true` to enable real INT8 KV-cache kernels.
+* `--prompt`: The text description used for the generation benchmark.
+* `--seed`: Fixed seed for reproducibility during latency measurement.
+
 ## Infinity VAR: 8B Bitwise Autoregressive Image Generation on Edge GPUs
 
 Visual Autoregressive models achieve state-of-the-art fidelity, but the monotonically growing KV-cache introduces a severe Memory Wall, confining these systems to data-center infrastructure. This fork provides a specialized compression pipeline to break that wall.
