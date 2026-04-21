@@ -46,5 +46,32 @@ pip install -e .
 cd Infinity
 pip install -r requirements.txt
 ```
+## Infinity VAR: 8B Bitwise Autoregressive Image Generation on Edge GPUs
 
+Visual Autoregressive models achieve state-of-the-art fidelity, but the monotonically growing KV-cache introduces a severe Memory Wall, confining these systems to data-center infrastructure. This fork provides a specialized compression pipeline to break that wall.
+
+Through structural profiling, we diagnosed extreme activation outliers in the FFN down-projections of the Infinity architecture (peaking at 353x the median). To resolve this, `ptq_infinity.py` extends the **SVDQuant** paradigm to VAR models, decoupling outliers via a low-rank branch. To mitigate the cache footprint without runtime overhead, we implement **Asymmetric Per-Channel INT8 Quantization**, mapping highly skewed channel variances to static 8-bit limits optimized via Golden-Section Search. 
+
+This pipeline reduces the peak memory of the Infinity 8B model by 64% (from 37.1 GB to 13.3 GB), enabling local execution on mid-range edge devices. 
+
+### Generative Quality Evaluation
+Below is the generation quality evaluated with 5,000 samples from the MJHQ-30K dataset. Our quantization pipeline retains near-FP16 aesthetic alignment (ImageReward) while compressing the model severely.
+
+| Model | Precision | Method | FID (↓) | ImageReward (↑) | CLIP-IQA (↑) |
+|---|---|---|---|---|---|
+| Infinity 8B | FP16 | -- | 19.6 | 1.18 | 0.945 |
+| | INT W4A4 | SVDQuant + KV8 | 19.0 | 1.13 | 0.935 |
+| Infinity 2B | FP16 | -- | 21.3 | 0.981 | 0.947 |
+| | INT W4A4 | SVDQuant + KV8 | 20.2 | 0.840 | 0.919 |
+
+### Hardware Efficiency Benchmarks
+System footprint and end-to-end latency measured on an NVIDIA Jetson AGX Orin 64GB. The "Feasible HW" tier indicates the minimum commercial module required to run the model natively in memory.
+
+| Model | Precision | Peak Memory | Latency | Feasible HW |
+|---|---|---|---|---|
+| Flux.1-dev | INT W4A4 | 11.8 GB | 112.0 s | Orin NX (16GB) |
+| Infinity 8B | FP16 | 37.1 GB | 25.1 s | AGX Orin (64GB) |
+| Infinity 8B | INT W4A4 + KV8 | **13.3 GB** | **27.0 s** | **Orin NX (16GB)** |
+| Infinity 2B | FP16 | 16.0 GB | 8.46 s | AGX Orin (32GB) |
+| Infinity 2B | INT W4A4 + KV8 | **7.71 GB** | **11.5 s** | **Orin Nano (8GB)** |
 
