@@ -40,17 +40,21 @@ pip install -r requirements.txt
 ```
 ## Usage
 
-To quantize the Infinity models, execute the `ptq_infinity_new.py` script. The framework relies on a strict configuration hierarchy. You must pass the YAML files as positional arguments to construct the pipeline: defining the model, setting the calibration parameters, and dictating the specific quantization math.
+To quantize the Infinity models, execute the `ptq_infinity.py` script. The framework relies on a strict configuration hierarchy. You must pass the YAML files as positional arguments to construct the pipeline: defining the model, setting the calibration parameters, and dictating the specific quantization math.
 
 ### Running Quantization
 
 The following command executes the baseline quantization pipeline for the Infinity 8B model, utilizing the specific calibration settings defined in `qdiff.yaml` and running the complete **INT4 SVDQuant** pipeline (incorporating both activation smoothing and low-rank weight branches):
 
-python ptq_infinity_new.py configs/models/infinity-8b.yaml configs/collect/qdiff.yaml configs/svdquant/int4.yaml
+```python
+python -m deepcompressor.app.diffusion.ptq_infinity configs/models/infinity-8b.yaml configs/collect/qdiff.yaml configs/svdquant/int4.yaml
+```
 
 **Configuration Override Hierarchy:** Positional arguments dictate the override order (files passed later in the command override overlapping keys in earlier files). Ensure all files remain within the relative paths of your working directory. For rapid debugging, you can append additional override configurations (e.g., reducing calibration steps via `fast.yaml`) at the end of the execution chain:
 
-python ptq_infinity_new.py configs/models/infinity-8b.yaml configs/collect/qdiff.yaml configs/svdquant/int4.yaml configs/svdquant/fast.yaml
+```python
+python -m deepcompressor.app.diffusion.ptq_infinity configs/models/infinity-8b.yaml configs/collect/qdiff.yaml configs/svdquant/int4.yaml configs/svdquant/fast.yaml
+```
 
 *(Note: End-to-end evaluation and image generation using the quantized models are handled via separate evaluation scripts, not during this initial PTQ pass).*
 
@@ -59,7 +63,7 @@ python ptq_infinity_new.py configs/models/infinity-8b.yaml configs/collect/qdiff
 
 Visual Autoregressive models achieve state-of-the-art fidelity, but the monotonically growing KV-cache introduces a severe Memory Wall, confining these systems to data-center infrastructure. This fork provides a specialized compression pipeline to break that wall.
 
-Through structural profiling, we diagnosed extreme activation outliers in the FFN down-projections of the Infinity architecture (peaking at 353x the median). To resolve this, `ptq_infinity_new.py` extends the **SVDQuant** paradigm to VAR models, decoupling outliers via a low-rank branch. To mitigate the cache footprint without runtime overhead, we implement **Asymmetric Per-Channel INT8 Quantization**, mapping highly skewed channel variances to static 8-bit limits optimized via Golden-Section Search. 
+Through structural profiling, we diagnosed extreme activation outliers in the FFN down-projections of the Infinity architecture (peaking at 353x the median). To resolve this, `ptq_infinity.py` extends the **SVDQuant** paradigm to VAR models, decoupling outliers via a low-rank branch. To mitigate the cache footprint without runtime overhead, we implement **Asymmetric Per-Channel INT8 Quantization**, mapping highly skewed channel variances to static 8-bit limits optimized via Golden-Section Search. 
 
 This pipeline reduces the peak memory of the Infinity 8B model by 64% (from 37.1 GB to 13.3 GB), enabling local execution on mid-range edge devices. 
 
