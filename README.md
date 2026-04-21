@@ -58,6 +58,17 @@ python -m deepcompressor.app.diffusion.ptq_infinity configs/models/infinity-8b.y
 
 *(Note: End-to-end evaluation and image generation using the quantized models are handled via separate evaluation scripts, not during this initial PTQ pass).*
 
+### Example Configurations
+
+The repository provides several example configurations to demonstrate different quantization strategies for the Infinity models.
+
+* **Base Model Configurations:**
+    * `configs/models/infinity-8b.yaml`: Defines the pipeline architecture, precision (W4A4 + SVDQuant LoRA), and paths for the 8B model.
+    * `configs/models/infinity-2b.yaml`: Defines the pipeline architecture, precision (W4A4 + SVDQuant LoRA), and paths for the 2B model.
+
+* **Quantization Strategies:**
+    * `configs/models/infinity-2b-smoothquant.yaml`: Enables activation smoothing to mitigate outliers without utilizing the low-rank branch for weights.
+    * `configs/models/infinity-2b-naive.yaml`: Performs standard block-wise quantization (e.g., 64-group) on the weights. This is useful as a baseline but may cause degradation, especially in the 2B model.
 
 ## Infinity VAR: 8B Bitwise Autoregressive Image Generation on Edge GPUs
 
