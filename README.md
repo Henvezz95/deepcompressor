@@ -64,7 +64,7 @@ Analysis of the monotonically growing KV-cache reveals that variance is not unif
 | Metric | Measured Value (8B) | Technical Requirement |
 | :--- | :--- | :--- |
 | **$CV_{channel}$** | > 1.2 | **Per-Channel Scaling**: Variance is driven by specific channels rather than tokens. |
-| **Skewness** | ~0.85 (Key Cache) | **Asymmetric Mapping**: Distributions are highly skewed (for some channels), requiring non-centered zero-points. |
+| **Skewness** | ~0.85 (Key Cache) | **Asymmetric Mapping**: Distributions are highly skewed (in some channels), requiring non-centered zero-points. |
 
 By running the diagnostic script, users can verify that these structural characteristics are consistent across both 2B and 8B variants, validating the selection of **Asymmetric Per-Channel INT8** for the cache pipeline.
 
