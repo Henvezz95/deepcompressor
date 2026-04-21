@@ -42,7 +42,7 @@ pip install -r requirements.txt
 
 To quantize the Infinity models, execute the `ptq_infinity.py` script. The framework relies on a strict configuration hierarchy. You must pass the YAML files as positional arguments to construct the pipeline: defining the model, setting the calibration parameters, and dictating the specific quantization math.
 
-### Running Quantization
+### 1. Running Quantization
 
 The following command executes the baseline quantization pipeline for the Infinity 8B model, utilizing the specific calibration settings defined in `qdiff.yaml` and running the complete **INT4 SVDQuant** pipeline (incorporating both activation smoothing and low-rank weight branches):
 
@@ -70,7 +70,7 @@ The repository provides several example configurations to demonstrate different 
     * `configs/models/infinity-2b-smoothquant.yaml`: Enables activation smoothing to mitigate outliers without utilizing the low-rank branch for weights.
     * `configs/models/infinity-2b-naive.yaml`: Performs standard block-wise quantization (e.g., 64-group) on the weights. This is useful as a baseline but may cause degradation, especially in the 2B model.
 
-### KV-Cache Calibration
+## 2. KV-Cache Calibration
 
 To generate the optimal Asymmetric Per-Channel INT8 quantization scales for the KV-cache, execute the `calibrate_cache_quantization` module. Unlike standard LLM cache quantization, our analysis of VAR models indicates that variance is predominantly channel-driven across both Keys and Values. 
 
@@ -89,7 +89,7 @@ python -m deepcompressor.app.diffusion.calibrate_cache_quantization configs/mode
 
 *(Note: This routine calculates the `scale` and `zero_point` parameters saved to `kv_scales/kv_quant_calib.pt`, which are subsequently required to run the full W4A4+KV8 inference pipeline).*
 
-## Quality Evaluation (Fake-Quantization)
+## 3. Quality Evaluation (Fake-Quantization)
 
 To assess the generative fidelity (FID, ImageReward, CLIP-IQA) before deploying to edge hardware, the `benchmark_assembled_model.py` script provides a bit-accurate simulation of the quantization noise. By using **fake-quantization**, the framework applies low-bit logic (e.g., INT4 or INT8) to the model weights and activations while performing the underlying computation in `bfloat16`.
 
@@ -126,6 +126,24 @@ python -m evaluation.benchmark_assembled_model \
 | `--ref-root` | `str` | Path to the ground-truth reference dataset for metrics that require a reference (e.g., SSIM, PSNR, LPIPS). |
 
 **Note on Artifacts:** The script automatically looks for cache scales in `runs/kv_scales/kv_quant_calib.pt`. Ensure you have run the `calibrate_cache_quantization` script before enabling the `--enable_kv_quant` flag.
+
+## 4. Performance & Memory Benchmarking (Real Quantization)
+
+To measure the actual memory savings and inference speed on edge hardware (e.g., NVIDIA Jetson), use the `infinity_w4a4_test.py` script. Unlike the quality evaluation script, this routine swaps standard layers for real **SVDQuantLinear** modules and executes optimized low-bit kernels.
+
+### Prerequisites
+
+This script requires specialized hardware-accelerated kernels for 4-bit weight and 4-bit activation computation. You must install the following dependency:
+
+* **Nunchaku (Specialized Fork):** [Henvezz95/nunchaku-fork](https://github.com/Henvezz95/nunchaku-fork)
+
+### Benchmarking Workflow
+
+The script performs the following hardware validation steps:
+1. **Model Transformation:** Swaps standard `nn.Linear` layers for `SVDQuantLinear` (defaulting to Rank-32) while excluding sensitive layers like the transformer head and embeddings.
+2. **Artifact Injection:** Loads the real quantized weights (`model.pt`) and the high-precision SVD branches (`branch.pt`) directly into the specialized modules.
+3. **Cache Activation:** Integrates the calibrated INT8 KV-cache parameters via the `attach_kv_qparams` utility.
+4. **Footprint Profiling:** Executes multiple generation loops and reports the absolute peak GPU memory usage using `torch.cuda.max_memory_allocated()`.
 
 ### Usage
 
