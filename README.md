@@ -39,10 +39,6 @@ cd Infinity
 pip install -r requirements.txt
 ```
 
-# Usage
-
-To quantize the Infinity models, execute the `ptq_infinity.py` script. The framework relies on a strict configuration hierarchy. You must pass the YAML files as positional arguments to construct the pipeline: defining the model, setting the calibration parameters, and dictating the specific quantization math.
-
 # 0. Technical Motivation: Diagnostic Profiling
 
 The quantization strategies implemented in this repository are driven by a deep structural analysis of the Infinity VAR architecture. Unlike standard LLMs, Visual Autoregressive models exhibit unique activation patterns that necessitate specialized treatment.
