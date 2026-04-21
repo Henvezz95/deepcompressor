@@ -35,7 +35,7 @@ cd deepcompressor
 2. Install dependencies:
 ```bash
 pip install -e .
-cd Infinity
+cd Infinity_rep
 pip install -r requirements.txt
 ```
 
