@@ -89,6 +89,43 @@ python -m deepcompressor.app.diffusion.calibrate_cache_quantization configs/mode
 
 *(Note: This routine calculates the `scale` and `zero_point` parameters saved to `kv_scales/kv_quant_calib.pt`, which are subsequently required to run the full W4A4+KV8 inference pipeline).*
 
+## Quality Evaluation (Fake-Quantization)
+
+To assess the generative fidelity (FID, ImageReward, CLIP-IQA) before deploying to edge hardware, the `benchmark_assembled_model.py` script provides a bit-accurate simulation of the quantization noise. By using **fake-quantization**, the framework applies low-bit logic (e.g., INT4 or INT8) to the model weights and activations while performing the underlying computation in `bfloat16`.
+
+This allows for granular ablation studies—independently toggling Weight, Activation, and KV-cache quantization to identify the precise impact on aesthetic quality.
+
+### Running the Evaluation
+
+The following command evaluates an Infinity 8B model on the **MJHQ** and **DCI** benchmarks. It simulates a complete **W4A4 + KV8** pipeline by fusing the SVD low-rank branches and activation scales generated during the PTQ phase:
+
+```bash
+python -m evaluation.benchmark_assembled_model \
+    configs/models/infinity-8b.yaml \
+    --ref-root ./evaluation_output/infinity_fp16_8b \
+    --gen-root ./evaluation_output/infinity_w4a4_kv8_8b \
+    --base-path ./runs/diffusion/int4_rank32_8b/ \
+    --enable_weight_quant true \
+    --enable_activation_quant true \
+    --enable_kv_quant true \
+    --eval-benchmarks MJHQ DCI \
+    --eval-num-samples 5000 \
+    --eval-gt-metrics clip_iqa clip_score fid image_reward psnr ssim lpips
+```
+
+### Script Arguments
+
+| Argument | Type | Description |
+| :--- | :--- | :--- |
+| `--base-path` | `str` | Directory containing the PTQ artifacts: `model.pt`, `smooth.pt`, and `branch.pt`. |
+| `--enable_weight_quant` | `bool` | Enables fake-quantization for transformer weights. |
+| `--enable_activation_quant`| `bool` | Enables fake-quantization for linear layer input activations. |
+| `--enable_kv_quant` | `bool` | Enables Asymmetric Per-Channel INT8 simulation for the KV-cache using optimized scales. |
+| `--gen-root` | `str` | Destination for generated images and the final `results.json`. |
+| `--ref-root` | `str` | Path to the ground-truth reference dataset for metrics that require a reference (e.g., SSIM, PSNR, LPIPS). |
+
+**Note on Artifacts:** The script automatically looks for cache scales in `runs/kv_scales/kv_quant_calib.pt`. Ensure you have run the `calibrate_cache_quantization` script before enabling the `--enable_kv_quant` flag.
+
 ## Infinity VAR: 8B Bitwise Autoregressive Image Generation on Edge GPUs
 
 Visual Autoregressive models achieve state-of-the-art fidelity, but the monotonically growing KV-cache introduces a severe Memory Wall, confining these systems to data-center infrastructure. This fork provides a specialized compression pipeline to break that wall.
