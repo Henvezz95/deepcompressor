@@ -15,6 +15,8 @@ This repository is a specialized fork of the DeepCompressor framework, tailored 
 * **What this fork adds:** We introduce a comprehensive W4A4 and INT8 KV-cache quantization pipeline specifically designed for the **Infinity** family of generative models (2B and 8B). It mitigates extreme activation outliers using SVDQuant and compresses the monotonically growing KV-cache via Asymmetric Per-Channel INT8 Quantization. This allows the 8B model to run natively on 16GB edge silicon.
 * **Paper:** For full methodological details, evaluation metrics, and edge hardware deployment strategies on NVIDIA Jetson architectures, please refer to our paper: [*Enabling 8B Bitwise Autoregressive Image Generation on Edge GPUs*](https://iris.unimore.it/handle/11380/1400428) (Available Soon).
 
+<img src='./assets/banner.jpg'>
+
 # Acknowledgements & Upstream Projects
 
 This work builds upon exceptional foundational research. For additional insights, upstream features, and the original codebases, please refer to the following projects:
