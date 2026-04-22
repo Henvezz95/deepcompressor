@@ -53,7 +53,7 @@ python -m evaluation.activations_measurements configs/models/infinity-8b.yaml co
 
 Through our profiling, we identified extreme activation outliers in the **FFN down-projections**, with Kurtosis values significantly exceeding Gaussian distributions.
 
-* **Max-to-Median Ratio**: Reaches up to **353x** in the 8B model.
+* **Max-to-Median Ratio**: Reaches up to **353x** in the 2B model.
 * **Implication**: Standard Min-Max quantization would lead to massive precision loss; this justifies our use of **SVDQuant** to decouple these outliers into a high-precision low-rank branch.
 
 ### KV-Cache Variance (Self-Attention)
@@ -215,3 +215,10 @@ System footprint and end-to-end latency measured on an NVIDIA Jetson AGX Orin 64
 | Infinity 8B | INT W4A4 + KV8 | **13.3 GB** | **27.0 s** | **Orin NX (16GB)** |
 | Infinity 2B | FP16 | 16.0 GB | 8.46 s | AGX Orin (32GB) |
 | Infinity 2B | INT W4A4 + KV8 | **7.71 GB** | **11.5 s** | **Orin Nano (8GB)** |
+
+**Qualitative Comparison of our compressed Infinity 8B model.** We evaluate fidelity across four scenarios: Detailed Portrait, Architectural Geometry, Landscape Gradients, and Object Representation. Columns compare Infinity 8B in FP16 vs.\ our W4A4 quantization pipeline against Flux.1-dev (quantized via SVDQuant W4A4 INT4). The quantized Infinity 8B retains near-FP16 quality, showing comparable or even superior output quality to the baseline Flux.1-dev.
+<img src='./assets/var_compressor_example_1.jpg'>
+
+Prompts are: (1) *"Portrait, photograph, canon 5d, magazine, editorial, full profile shot, photorealism, Annie Lebowitz, middle aged man, realistic, accurate"*; 
+    (2) *"A photograph of an intricate wooden gazebo with a traditional Asian-style tiled roof, set in a dense wooded forest clearing. Towering mountains in the background under a partly cloudy sky. Natural daylight, highly detailed wood grain and foliage, 8k"*; 
+    (3) *"Photorealistic. 4k. A hidden beach accessible only by boat, surrounded by towering rock formations, lush vegetation, and colorful coral reefs, the sun sets behind the mountains, subtle warm orange glow close over the water, creating a peaceful and romantic setting, Multiple light sources. high detail. ultra realistic"*; (4) *"A detailed close-up photograph of a small shrine against a solid black background. A weathered stone statue in the center, surrounded by fresh colorful flowers, several burning candles casting warm light, and fruit wrapped in clear cellophane plastic. Macro lens, highly textured, cinematic lighting, 8k"*. (1) and (4) are taken from MJHQ, (2) and (3) from sDCI. The same seed is used for all models.
