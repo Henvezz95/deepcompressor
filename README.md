@@ -1,4 +1,4 @@
-<h1 align="center"><code><b>[ Infinity-VAR : DeepCompressor ]</b></code></h1>
+<h1 align="center"><code><b>[ VAR-Compressor ]</b></code></h1>
 
 <p align="center"><b><i>8B Bitwise Autoregressive Generation on Edge GPUs</i></b></p>
 
