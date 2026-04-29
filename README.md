@@ -41,6 +41,8 @@ cd Infinity_rep
 pip install -r requirements.txt
 ```
 
+The compressed models used in the original paper can be downloaded from [here](https://unimore365-my.sharepoint.com/:f:/g/personal/319554_unimore_it/IgBeCH6S5IiVRaGHdWUDq22gAXkwSix9MjWuz4PuJHo9ItI?e=ugEJeF).
+
 # 1. Technical Motivation: Diagnostic Profiling
 
 The quantization strategies implemented in this repository are driven by a deep structural analysis of the Infinity VAR architecture. Unlike standard LLMs, Visual Autoregressive models exhibit unique activation patterns that necessitate specialized treatment.
